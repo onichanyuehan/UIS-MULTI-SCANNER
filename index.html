@@ -352,6 +352,22 @@
     .activity-log-compact #activity-log-table-wrap { max-height: calc(100% - 76px); }
     .activity-log-compact #activity-log-table th, .activity-log-compact #activity-log-table td { padding: 5px 6px !important; }
     .activity-log-compact .activity-log-empty { padding: 24px 8px !important; font-size: 11px !important; }
+    /* Item Inventory Update: uniform, crisp rows without alternating glass/gray effects. */
+    .item-inventory-update,
+    .item-inventory-update * { text-shadow: none !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; filter: none !important; }
+    .item-inventory-update .item-inventory-table { background: #101820 !important; border-collapse: collapse !important; }
+    .item-inventory-update .item-inventory-table thead th { background: #18232d !important; color: #cbd5e1 !important; box-shadow: none !important; }
+    .item-inventory-update .item-inventory-table tbody tr,
+    .item-inventory-update .item-inventory-table tbody tr:nth-child(even),
+    .item-inventory-update .item-inventory-table tbody tr:nth-child(odd),
+    .item-inventory-update .item-inventory-table tbody tr:hover { background: #101820 !important; }
+    .item-inventory-update .item-inventory-table tbody td,
+    .item-inventory-update .item-inventory-table tbody tr:nth-child(even) td,
+    .item-inventory-update .item-inventory-table tbody tr:nth-child(odd) td,
+    .item-inventory-update .item-inventory-table tbody tr:hover td { background: #101820 !important; color: #e5edf5; box-shadow: none !important; }
+    .item-inventory-update .item-inventory-table tbody tr { border-bottom: 1px solid #263440 !important; }
+    .item-inventory-update .item-inventory-table tbody tr:hover td { background: #101820 !important; }
+    .item-inventory-update .item-inventory-list-wrap { background: #0d151c !important; box-shadow: none !important; }
 
     header.sticky.uis-app-header {
       position: sticky; top: 0; z-index: 30;
@@ -891,7 +907,7 @@ button:not(:disabled):active, [role="button"]:active, button.uis-pressing{ trans
 @keyframes uisModalGlass{ from{ transform:translateY(10px); opacity:0; } to{ transform:none; opacity:1; } }
 #toast-container > *{ animation:uisToastGlass .32s ease; }
 @keyframes uisToastGlass{ from{ transform:translateY(-8px); opacity:0; } to{ transform:none; opacity:1; } }
-#uis-3d-controls{ position:fixed; right:12px; bottom:12px; z-index:9999; display:flex; gap:6px; align-items:center; opacity:.92; }
+#uis-3d-controls{ position:relative; right:auto; bottom:auto; z-index:1; display:flex; gap:6px; align-items:center; opacity:.92; width:max-content; max-width:100%; }
 #uis-3d-controls button{ height:42px; border-radius:999px; border:1px solid rgba(255,255,255,.16); background:rgba(6,10,22,.72); backdrop-filter:blur(12px); color:#eaf6ff; display:flex; align-items:center; justify-content:center; gap:7px; padding:0 13px; box-shadow:0 8px 20px rgba(0,0,0,.45); font-size:11px; font-weight:700; letter-spacing:.04em; cursor:pointer; white-space:nowrap; }
 #uis-3d-controls button:hover{ translate:0 -2px 0; }
 #uis-3d-controls button.uis-active{ background:linear-gradient(135deg, rgba(0,229,255,.32), rgba(139,92,246,.32)); border-color:rgba(0,229,255,.5); }
@@ -908,7 +924,7 @@ body[data-uis-3d="off"] #uis-webgl-bg, body[data-uis-3d="off"] #uis-css-fallback
 body[data-uis-3d="off"] .chatgpt-card, body[data-uis-3d="off"] #dashboard-metrics-grid > *, body[data-uis-3d="off"] .auth-panel, body[data-uis-3d="off"] #pos-cart-panel{ background-color:rgba(10,15,30,.94) !important; backdrop-filter:none; }
 body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shadow:none; }
 @media (prefers-reduced-motion: reduce){ #uis-webgl-bg, #uis-3d-veil{ display:none; } }
-@media (max-width:640px){ #uis-3d-controls{ right:10px; bottom:10px; } #uis-3d-controls button{ height:38px; padding:0 10px; font-size:10px; } }
+@media (max-width:640px){ #uis-3d-controls button{ height:38px; padding:0 10px; font-size:10px; } }
 </style>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -3298,7 +3314,6 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
       searchQuery: '',
       gridSearchSelectedRow: null,
       gridSearchSelectedSheetIdx: null,
-      filterModifiedOnly: false,
       _gridSearchTimer: null,
       _gridSearchCache: null,
       _gridSearchWorker: null,
@@ -3568,20 +3583,31 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
         return value || String(record.itemName || '').trim();
       },
       async openActivityLocation(sheetIdx, rowNumber, workbookIdx = this.activeWorkbookTabIndex || 0) {
-        const targetBookIdx = Number(workbookIdx);
-        if (targetBookIdx !== (this.activeWorkbookTabIndex || 0)) {
-          await this.switchWorkbookTab(targetBookIdx);
-          if ((this.activeWorkbookTabIndex || 0) !== targetBookIdx) return;
+        const targetSheetIdx = Number(sheetIdx), targetRow = Number(rowNumber), targetBookIdx = Number(workbookIdx);
+        const targetWorkbook = this.getWorkspaceWorkbooks()[targetBookIdx];
+        const targetSheet = targetWorkbook?.worksheets?.[targetSheetIdx];
+        if (!targetSheet || !Number.isFinite(targetRow)) {
+          this.showToast('The original worksheet row could not be located.', 'error');
+          return;
         }
-        const idx = Number(sheetIdx), rowNum = Number(rowNumber), sheet = this.workbook?.worksheets?.[idx];
-        if (!sheet || !Number.isFinite(rowNum)) { this.showToast('The original worksheet row could not be located.', 'error'); return; }
-        const rowIndex = sheet.records.findIndex(rec => Number(rec.rowNumber) === rowNum);
-        if (rowIndex < 0) { this.showToast(`Could not locate row ${rowNum} in "${sheet.sheetName}".`, 'error'); return; }
-        this.activeSheetIdx = idx; this.activeView = 'workspace'; this.searchQuery = ''; this.filterModifiedOnly = false; this.activityFocusLocation = { sheetIdx: idx, rowNumber: rowNum };
-        this.gridScrollTop = Math.max(0, (rowIndex - 4) * this.gridRowHeight * (this.gridZoom || 1));
-        this.gridStartIndex = Math.max(0, Math.floor(this.gridScrollTop / (this.gridRowHeight * (this.gridZoom || 1))) - (this.gridOverscan || 10));
-        this.toggleSidebarDrawer(false); this.renderAll();
-        requestAnimationFrame(() => { const scroller = document.getElementById('virtual-worksheet-scroll'); if (scroller) scroller.scrollTop = this.gridScrollTop; });
+        // Delegate to the worksheet's canonical row navigator. It calculates the
+        // actual virtual-row offset (including filtered rows, gaps and custom heights)
+        // rather than estimating from the record-array index.
+        const targetRecord = (targetSheet.records || []).find(record => Number(record.rowNumber) === targetRow);
+        if (!targetRecord) {
+          this.showToast(`Could not locate row ${targetRow} in "${targetSheet.sheetName}".`, 'error');
+          return;
+        }
+        await this.openGridSearchResult(targetSheetIdx, targetRow, targetBookIdx);
+        if ((this.activeWorkbookTabIndex || 0) !== targetBookIdx || this.activeSheetIdx !== targetSheetIdx) return;
+        this.activityFocusLocation = { workbookIdx: targetBookIdx, sheetIdx: targetSheetIdx, rowNumber: targetRow };
+        this.gridSearchSelectedSheetIdx = targetSheetIdx;
+        this.gridSearchSelectedRow = targetRow;
+        const scroller = document.getElementById('virtual-worksheet-scroll');
+        if (scroller) {
+          const selectedRow = scroller.querySelector(`tr[data-grid-row="${targetRow}"]`);
+          if (selectedRow) selectedRow.scrollIntoView({ block: 'center' });
+        }
       },
       recordInventoryHistory(entry) {
         if (!entry) return;
@@ -5661,6 +5687,158 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
         container.innerHTML = `<div class="space-y-4"><div><div class="text-sm font-semibold text-white">Product Catalog</div><p class="text-xs text-neutral-400 mt-1">Searchable catalog across all imported workbooks.</p></div><div class="flex flex-wrap items-center gap-3"><input value="${escapeHtml(this.catalogSearchQuery)}" oninput="app.filterCatalogRows(this.value)" placeholder="Search product, SKU, barcode, workbook, or worksheet…" class="min-w-0 flex-1 rounded-xl border border-white/10 bg-[#171717] px-4 py-3 text-sm text-white"/><select onchange="app.setCatalogStockFilter(this.value)" class="rounded-xl border border-white/10 bg-[#171717] px-3 py-3 text-xs text-white"><option value="all" ${filter==='all'?'selected':''}>All stock</option><option value="low" ${filter==='low'?'selected':''}>Low stock</option><option value="zero" ${filter==='zero'?'selected':''}>Out of stock</option><option value="modified" ${filter==='modified'?'selected':''}>Modified records</option></select><span class="text-xs text-neutral-400"><b>${filtered.length.toLocaleString()}</b> records</span></div><div class="flex flex-wrap items-center justify-between gap-2 text-xs text-neutral-400"><span>Showing ${from.toLocaleString()}–${to.toLocaleString()} of ${filtered.length.toLocaleString()}</span><div class="flex items-center gap-2"><button onclick="app.setCatalogPage(${this.catalogPage-1})" ${this.catalogPage===0?'disabled':''} class="rounded-lg border border-white/10 px-3 py-2 disabled:opacity-30">Previous</button><span>Page ${this.catalogPage+1} / ${pageCount}</span><button onclick="app.setCatalogPage(${this.catalogPage+1})" ${this.catalogPage>=pageCount-1?'disabled':''} class="rounded-lg border border-white/10 px-3 py-2 disabled:opacity-30">Next</button></div></div><div class="overflow-auto rounded-xl border border-white/10 bg-[#171717]"><table class="w-full min-w-[660px] text-left"><thead class="sticky top-0 bg-[#242424] text-[10px] uppercase tracking-wide text-neutral-400"><tr><th class="p-3">Product</th><th class="p-3">Worksheet / Row</th><th class="p-3 text-right">Selling Price</th><th class="p-3 text-right">On hand</th><th class="p-3 text-right">Actions</th></tr></thead><tbody>${rows||'<tr><td colspan="5" class="p-6 text-center text-xs text-neutral-500">No product records found.</td></tr>'}</tbody></table></div></div>`;
       },
 
+      getUpdatedInventoryItems() {
+        const history = this.getAllInventoryHistory();
+        const historyFor = (item) => history.filter(entry =>
+          Number(entry.workbookIdx) === Number(item.workbookIdx) &&
+          String(entry.sheetName || '') === String(item.sheetName || '') &&
+          Number(entry.rowNumber) === Number(item.rowNumber)
+        );
+        return this.getOperationItems().map(item => {
+          const changes = historyFor(item);
+          return { ...item, quantityHistory: changes };
+        }).filter(item => item.modified || item.quantityHistory.length)
+          .sort((a,b) => {
+            const ta = new Date(a.quantityHistory[0]?.timestamp || 0).getTime() || 0;
+            const tb = new Date(b.quantityHistory[0]?.timestamp || 0).getTime() || 0;
+            return tb - ta || Number(b.rowNumber) - Number(a.rowNumber);
+          });
+      },
+
+      openUpdatedInventoryItem(itemKey) {
+        const item = this.getOperationItem(itemKey);
+        if (!item) { this.showToast('This updated item could not be located.', 'error'); return; }
+        // Use the selected item's own worksheet coordinates, never a history-log row
+        // or a positional index from the daily update list.
+        this.openActivityLocation(Number(item.sheetIdx), Number(item.record?.rowNumber ?? item.rowNumber), Number(item.workbookIdx));
+      },
+
+      setUpdatedItemsDate(dateKey) {
+        this.updatedItemsSelectedDate = String(dateKey || '');
+        this.renderMainView();
+      },
+
+      openUpdatedItemHistoryModal(itemKey) {
+        const item = this.getUpdatedInventoryItems().find(candidate => String(candidate.key) === String(itemKey));
+        if (!item) { this.showToast('This item history could not be located.', 'error'); return; }
+        const dateKey = String(this.updatedItemsSelectedDate || '');
+        const toDateKey = value => {
+          if (!value) return 'undated';
+          const date = value instanceof Date ? value : new Date(value);
+          if (!Number.isFinite(date.getTime())) return 'undated';
+          return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+        };
+        const entries = item.quantityHistory.filter(entry => toDateKey(entry.timestamp) === dateKey)
+          .sort((a,b) => (new Date(b.timestamp || 0).getTime() || 0) - (new Date(a.timestamp || 0).getTime() || 0));
+        const modalId = 'updated-item-history-modal';
+        document.getElementById(modalId)?.remove();
+        const rows = entries.map(entry => {
+          const delta = Number(entry.quantityChange || 0);
+          const deltaClass = delta > 0 ? 'text-emerald-300' : delta < 0 ? 'text-rose-300' : 'text-neutral-300';
+          const time = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : 'Time unavailable';
+          const detail = [entry.action, entry.reference, entry.notes].filter(Boolean).join(' · ');
+          return `<article class="rounded-lg border border-white/10 bg-[#101820] px-3 py-2"><div class="flex flex-wrap items-center justify-between gap-2"><span class="text-xs text-neutral-400">${escapeHtml(time)}</span><b class="text-xs ${deltaClass}">${delta>0?'+':''}${Number.isFinite(delta)?delta:'—'} units</b></div><div class="mt-1 text-sm font-semibold text-white">${escapeHtml(entry.previousQuantity)} <span class="text-neutral-500">→</span> ${escapeHtml(entry.newQuantity)}</div>${detail ? `<p class="mt-1 whitespace-pre-wrap break-words text-xs text-neutral-400">${escapeHtml(detail)}</p>` : ''}</article>`;
+        }).join('');
+        const modal = document.createElement('div');
+        modal.id = modalId;
+        modal.className = 'fixed inset-0 z-[120] flex items-center justify-center bg-black/80 p-3';
+        modal.setAttribute('role','dialog');
+        modal.setAttribute('aria-modal','true');
+        modal.setAttribute('aria-label', `Quantity changes for ${item.itemName || 'item'}`);
+        modal.innerHTML = `<section class="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-[#263440] bg-[#0d151c] shadow-2xl" onclick="event.stopPropagation()"><header class="flex items-start justify-between gap-3 border-b border-white/10 px-4 py-3"><div class="min-w-0"><h3 class="text-sm font-semibold text-white">Quantity change history</h3><p class="mt-1 truncate text-xs text-neutral-400">${escapeHtml(item.itemName || 'Unnamed item')} · ${escapeHtml(item.codes.join(' · ') || 'No barcode')}</p><p class="mt-1 text-[10px] text-neutral-500">${escapeHtml(dateKey === 'undated' ? 'Undated updates' : dateKey)} · ${entries.length} change(s)</p></div><button type="button" onclick="app.closeUpdatedItemHistoryModal()" class="shrink-0 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-neutral-200 hover:bg-white/5">Close</button></header><div class="min-h-0 space-y-2 overflow-y-auto p-3">${rows || '<p class="p-5 text-center text-xs text-neutral-500">No quantity changes recorded for this item on this day.</p>'}</div></section>`;
+        modal.addEventListener('click', () => this.closeUpdatedItemHistoryModal());
+        document.body.appendChild(modal);
+        this._updatedItemHistoryEscapeHandler = event => { if (event.key === 'Escape') this.closeUpdatedItemHistoryModal(); };
+        document.addEventListener('keydown', this._updatedItemHistoryEscapeHandler);
+      },
+
+      closeUpdatedItemHistoryModal() {
+        document.getElementById('updated-item-history-modal')?.remove();
+        if (this._updatedItemHistoryEscapeHandler) {
+          document.removeEventListener('keydown', this._updatedItemHistoryEscapeHandler);
+          this._updatedItemHistoryEscapeHandler = null;
+        }
+      },
+
+      renderUpdatedItemsView(container) {
+        if (!container) return;
+        const items = this.getUpdatedInventoryItems();
+        const historyCount = items.reduce((sum, item) => sum + item.quantityHistory.length, 0);
+        const toDateKey = value => {
+          if (!value) return '';
+          const date = value instanceof Date ? value : new Date(value);
+          if (!Number.isFinite(date.getTime())) return '';
+          return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+        };
+        const dayLabel = key => {
+          if (key === 'undated') return 'Undated updates';
+          const [y,m,d] = key.split('-').map(Number);
+          const date = new Date(y, m-1, d);
+          const today = toDateKey(new Date());
+          const yesterday = toDateKey(new Date(Date.now()-86400000));
+          return key === today ? 'Today' : key === yesterday ? 'Yesterday' : date.toLocaleDateString(undefined,{weekday:'short',year:'numeric',month:'short',day:'numeric'});
+        };
+        const grouped = new Map();
+        items.forEach(item => {
+          const latestHistory = item.quantityHistory[0];
+          const matchingActivity = (this.activityLogs || []).filter(entry =>
+            Number(entry.workbookIdx) === Number(item.workbookIdx) &&
+            Number(entry.rowNumber) === Number(item.rowNumber) &&
+            (!entry.sheetName || String(entry.sheetName) === String(item.sheetName))
+          ).sort((a,b)=>(new Date(b.timestamp||0).getTime()||0)-(new Date(a.timestamp||0).getTime()||0))[0];
+          const dateKey = toDateKey(latestHistory?.timestamp || matchingActivity?.timestamp) || 'undated';
+          if (!grouped.has(dateKey)) grouped.set(dateKey, []);
+          grouped.get(dateKey).push(item);
+        });
+        const dateKeys = [...grouped.keys()].sort((a,b) => a === 'undated' ? 1 : b === 'undated' ? -1 : b.localeCompare(a));
+        if (!dateKeys.length) dateKeys.push('empty');
+        if (!dateKeys.includes(this.updatedItemsSelectedDate)) this.updatedItemsSelectedDate = dateKeys[0];
+        const selectedDate = this.updatedItemsSelectedDate;
+        const selectedItems = grouped.get(selectedDate) || [];
+        const tabs = dateKeys.map(key => {
+          const label = key === 'empty' ? 'No updates' : dayLabel(key);
+          const count = grouped.get(key)?.length || 0;
+          return `<button type="button" onclick="app.setUpdatedItemsDate('${escapeHtml(key)}')" class="shrink-0 rounded-lg border px-3 py-2 text-xs font-semibold ${selectedDate===key?'border-emerald-400/50 bg-emerald-500/15 text-emerald-200':'border-white/10 bg-[#171717] text-neutral-400 hover:text-white'}">${escapeHtml(label)} <span class="ml-1 opacity-70">${count}</span></button>`;
+        }).join('');
+        const rows = selectedItems.map(item => {
+          const qtyClass = item.qty === 0 ? 'text-rose-300' : item.qty !== null && item.qty <= this.lowStockThreshold ? 'text-amber-300' : 'text-emerald-300';
+          const price = Number.isFinite(item.unitPrice) ? this.formatMoney(item.unitPrice) : '—';
+          // Show one latest movement inline. The full same-day history is displayed in a modal.
+          const dailyHistory = item.quantityHistory.filter(entry => {
+            const entryDate = toDateKey(entry.timestamp) || 'undated';
+            return entryDate === selectedDate;
+          });
+          const visibleHistory = dailyHistory.slice(0, 1);
+          const historyRows = visibleHistory.map(entry => {
+            const delta = Number(entry.quantityChange || 0);
+            const deltaClass = delta > 0 ? 'text-emerald-300' : delta < 0 ? 'text-rose-300' : 'text-neutral-300';
+            const time = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : 'Time unavailable';
+            const detail = [entry.action, entry.reference, entry.notes].filter(Boolean).join(' · ');
+            return `<div class="rounded bg-black/20 px-1.5 py-0.5 text-[10px] leading-[10px]"><div class="flex flex-wrap items-center gap-x-1.5 gap-y-0"><span class="text-neutral-500">${escapeHtml(time)}</span><span class="text-neutral-300">${escapeHtml(entry.previousQuantity)} → ${escapeHtml(entry.newQuantity)}</span><b class="${deltaClass}">${delta>0?'+':''}${Number.isFinite(delta)?delta:'—'}</b></div>${detail?`<div class="mt-0.5 text-[9px] leading-[10px] text-neutral-500 whitespace-normal">${escapeHtml(detail)}</div>`:''}</div>`;
+          }).join('');
+          const historyControl = dailyHistory.length > 1 ? `<button type="button" onclick="event.stopPropagation();app.openUpdatedItemHistoryModal('${escapeHtml(item.key)}')" class="mt-1 rounded-md border border-sky-400/20 bg-sky-500/10 px-2 py-1 text-[9px] font-semibold text-sky-200 hover:bg-sky-500/20">View all ${dailyHistory.length} changes</button>` : '';
+          const badges = [item.record.isNewRow?'New item':'', item.record.isModified?'Quantity updated':'', item.record.isFullUpcModified?'Barcode updated':''].filter(Boolean);
+          return `<tr class="border-t border-white/5 hover:bg-white/[0.025] cursor-pointer" onclick="app.openUpdatedInventoryItem('${escapeHtml(item.key)}')" title="Open and highlight this exact worksheet row">
+            <td class="px-2 py-[5px] min-w-[190px]"><div class="text-xs font-semibold text-white">${escapeHtml(item.itemName||'Unnamed item')}</div><div class="mt-0.5 text-[9px] leading-[10px] text-neutral-500">${escapeHtml(item.workbookName)} · ${escapeHtml(item.sheetName)} · Row ${escapeHtml(item.rowNumber)}</div><div class="mt-0.5 flex flex-wrap gap-1">${badges.map(label=>`<span class="rounded bg-amber-500/10 px-1.5 py-0.5 text-[9px] text-amber-200">${label}</span>`).join('')}</div></td>
+            <td class="px-2 py-[5px] min-w-[150px]"><div class="text-[11px] font-mono text-neutral-200 break-all">${escapeHtml(item.codes.join(' · ')||'No barcode')}</div></td>
+            <td class="px-2 py-[5px] text-right whitespace-nowrap text-xs font-semibold text-white">${escapeHtml(price)}</td>
+            <td class="px-2 py-[5px] text-right whitespace-nowrap text-sm font-bold ${qtyClass}">${item.qty===null?'Invalid':item.qty.toLocaleString()}</td>
+            <td class="px-2 py-[5px] min-w-[220px]"><div class="space-y-0.5">${historyRows || '<span class="text-[10px] text-neutral-500">No quantity movement recorded for this day</span>'}</div>${historyControl}</td>
+            <td class="px-2 py-[5px] text-right whitespace-nowrap"><span class="text-[10px] font-semibold text-emerald-300">Open row ↗</span></td>
+          </tr>`;
+        }).join('');
+        container.innerHTML = `<section class="item-inventory-update flex h-full min-h-0 flex-col gap-3">
+          <header class="flex flex-wrap items-center justify-between gap-3"><div><div class="text-sm font-semibold text-white">Item Inventory Update</div><p class="mt-1 text-xs text-neutral-400">Daily update log. Each product is displayed as a single row with barcode, price, current quantity, and quantity-change history.</p></div><div class="flex gap-2"><div class="rounded-lg border border-white/10 bg-[#171717] px-3 py-2"><div class="text-[9px] uppercase text-neutral-500">Updated items</div><div class="text-lg font-bold text-emerald-300">${items.length.toLocaleString()}</div></div><div class="rounded-lg border border-white/10 bg-[#171717] px-3 py-2"><div class="text-[9px] uppercase text-neutral-500">Quantity changes</div><div class="text-lg font-bold text-sky-300">${historyCount.toLocaleString()}</div></div></div></header>
+          <nav class="flex shrink-0 gap-2 overflow-x-auto pb-1" aria-label="Daily inventory updates">${tabs}</nav>
+          <div class="item-inventory-list-wrap min-h-0 flex-1 overflow-auto rounded-xl border border-[#263440]">
+            <table class="item-inventory-table w-full min-w-[900px] text-left">
+              <thead class="sticky top-0 z-10 bg-[#242424] text-[9px] uppercase tracking-wide text-neutral-400"><tr><th class="px-3 py-3">Updated item / product</th><th class="px-3 py-3">Barcode / SKU</th><th class="px-3 py-3 text-right">Price</th><th class="px-3 py-3 text-right">Current qty</th><th class="px-3 py-3">Quantity changes history</th><th class="px-3 py-3 text-right">Worksheet</th></tr></thead>
+              <tbody>${rows || `<tr><td colspan="6" class="p-10 text-center text-xs text-neutral-500">${items.length?'No updated items for this day.':'No inventory updates have been recorded yet.'}</td></tr>`}</tbody>
+            </table>
+          </div>
+        </section>`;
+      },
+
       renderInsightsView(container) {
         const data = this.getInventoryInsights();
         const a = this.getAdvancedInventoryAnalytics();
@@ -5820,7 +5998,6 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
         this.activeSheetIdx = sheetIdx;
         this.activeView = 'workspace';
         this.searchQuery = '';
-        this.filterModifiedOnly = false;
         const rowsAbove = 4;
         this.gridScrollTop = Math.max(0, (rowIndex - rowsAbove) * this.gridRowHeight * (this.gridZoom || 1));
         this.gridStartIndex = Math.max(0, Math.floor(this.gridScrollTop / (this.gridRowHeight * (this.gridZoom || 1))) - (this.gridOverscan || 10));
@@ -6838,6 +7015,13 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
             details: validationError ? `Cell ${cellAddress} invalid: ${validationError}` : `Cell ${cellAddress} edited manually.`
           });
           if (!validationError) {
+            const trackedItem = this.getOperationItem(`${this.activeWorkbookTabIndex}:${this.activeSheetIdx}:${rowNumber}`);
+            this.recordInventoryHistory({
+              workbookIdx: this.activeWorkbookTabIndex, sheetName: activeSheet.sheetName, rowNumber,
+              itemName, barcode: trackedItem?.codes?.join(' | ') || String(rec.currentFullUpcValue || ''),
+              previousQuantity: Number(prevVal || 0), newQuantity: Number(trimmed || 0),
+              quantityChange: Number(trimmed || 0) - Number(prevVal || 0), action: 'MANUAL_QUANTITY_EDIT'
+            });
             this.appendWorkbookAudit(this.activeWorkbookTabIndex, {
               id: `edit-${Date.now()}-${Math.random()}`, timestamp: new Date().toLocaleTimeString(),
               sheetName: activeSheet.sheetName, cellAddress,
@@ -7214,8 +7398,7 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
           this.workbook = this.openWorkbooks[targetIndex];
           this.restoreActiveWorkbookSession(this.workbook);
           this.searchQuery = '';
-          this.filterModifiedOnly = false;
-          this.posCart = cart;
+            this.posCart = cart;
           this.posLastReceipt = receipt;
           this.undoStack = undo;
           this.redoStack = redo;
@@ -7271,6 +7454,7 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
             this.activeView === 'scanner' ? 'Scanner' :
             this.activeView === 'workspace' ? 'Grid' :
             this.activeView === 'catalog' ? 'Catalog' :
+            this.activeView === 'item-updates' ? 'Item Updates' :
             this.activeView === 'operations' ? 'Operations' :
             this.activeView === 'pos' ? 'POS' :
             this.activeView === 'bulk' ? 'Bulk' :
@@ -7450,6 +7634,7 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
           ]},
           { label: 'Inventory', items: [
             { id: 'catalog', label: 'Product Catalog', icon: 'package-search' },
+            { id: 'item-updates', label: 'Item Inventory Update', icon: 'clipboard-check' },
             { id: 'workspace', label: 'Worksheet Grid', icon: 'table' },
             { id: 'operations', label: 'Stock Operations', icon: 'package-plus' },
             { id: 'bulk', label: 'Bulk Update', icon: 'clipboard-paste' },
@@ -7572,6 +7757,9 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
         if (this.activeView === 'catalog') {
           if (stageTitle) stageTitle.textContent = 'Product Catalog';
           this.renderCatalogView(container);
+        } else if (this.activeView === 'item-updates') {
+          if (stageTitle) stageTitle.textContent = 'Item Inventory Update';
+          this.renderUpdatedItemsView(container);
         } else if (this.activeView === 'operations') {
           if (stageTitle) stageTitle.textContent = 'Stock Operations';
           this.renderOperationsView(container);
@@ -7635,15 +7823,7 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
       },
 
       getGridRowsForView(sheet) {
-        const recordsByRow = new Map((sheet?.records || []).map(record => [Number(record.rowNumber), record]));
         let rows = this.getGridSourceRows(sheet);
-        if (this.filterModifiedOnly) {
-          rows = rows.filter(row => {
-            const rowNumber = Number(row.rowNumber);
-            const record = recordsByRow.get(rowNumber);
-            return rowNumber <= Number(sheet.headerRowNum || 1) || !!(record?.isModified || record?.isFullUpcModified) || !!sheet.hiddenRows?.[rowNumber - 1];
-          });
-        }
         return rows;
       },
 
@@ -7806,20 +7986,6 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
       },
       resetGridScroll() { this.gridScrollTop = 0; this.gridScrollLeft = 0; this.gridStartIndex = 0; },
 
-      toggleGridModifiedFilter() {
-        this.filterModifiedOnly = !this.filterModifiedOnly;
-        this.resetGridScroll();
-        if (this.searchQuery.trim()) {
-          this._gridSearchRequestId++;
-          this._gridSearchMatchedRows = null;
-          this._gridSearchMatchedQuery = '';
-          this.renderMainView();
-          this.handleGridSearch({ value: this.searchQuery });
-          return;
-        }
-        this.renderMainView();
-      },
-
       ensureGridSearchWorker() {
         if (this._gridSearchWorker || !window.Worker || !window.Blob) return this._gridSearchWorker;
         const workerSource = `
@@ -7835,7 +8001,6 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
               const matches = [];
               for (let i=0;i<rows.length;i++) {
                 const row = rows[i];
-                if (data.modifiedOnly && !row.modified) continue;
                 let hit = row.text.includes(q);
                 if (!hit && numeric) hit = row.digits.some(v => v && (v.includes(digits) || digits.includes(v)));
                 if (hit) matches.push(i);
@@ -7914,10 +8079,10 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
           const worker = this.ensureGridSearchWorker();
           if (worker && this._gridSearchCache) {
             const id = ++this._gridSearchRequestId;
-            worker.postMessage({type:'search', id, query, modifiedOnly:this.filterModifiedOnly});
+            worker.postMessage({type:'search', id, query});
           } else {
             const q = query.toLowerCase(), digits = query.replace(/[^0-9]/g,'');
-            this._gridSearchMatchedRows = (this._gridSearchCache || []).filter(r => (!this.filterModifiedOnly || r.modified) && (r.text.includes(q) || (digits.length >= 3 && r.digits.some(v => v && (v.includes(digits) || digits.includes(v))))));
+            this._gridSearchMatchedRows = (this._gridSearchCache || []).filter(r => r.text.includes(q) || (digits.length >= 3 && r.digits.some(v => v && (v.includes(digits) || digits.includes(v)))));
             this._gridSearchMatchedQuery = query;
             if (this.activeView === 'workspace') this.renderMainView();
           }
@@ -7951,7 +8116,6 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
         this.gridSearchSelectedRow = targetRow;
         this.gridSearchSelectedSheetIdx = targetSheetIdx;
         this.searchQuery = '';
-        this.filterModifiedOnly = false;
         this.activeSheetIdx = targetSheetIdx;
         this.activeView = 'workspace';
         this.gridScrollTop = Math.max(0, targetTop - Math.max(48, 0));
@@ -8069,7 +8233,6 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
                   <div class="relative flex-1 max-w-md"><i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
                     <input id="worksheet-grid-search" type="text" value="${escapeHtml(this.searchQuery)}" oninput="app.handleGridSearch(this)" placeholder="Search all imported workbooks..." class="w-full min-w-0 pl-9 pr-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs sm:text-sm text-white" />
                   </div>
-                  <button onclick="app.toggleGridModifiedFilter()" class="px-3 py-2 rounded-lg text-xs border ${this.filterModifiedOnly ? 'bg-amber-500/20 border-amber-500/40 text-amber-300' : 'bg-slate-950 border-slate-800 text-slate-400'}">Modified Only</button>
                 </div>
                 <span class="text-xs text-slate-400">${this._gridSearchMatchedQuery !== rawQ ? 'Searching…' : `${matches.length} match(es)`}</span>
               </div>
@@ -8251,7 +8414,6 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
                   <i data-lucide="search" class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
                   <input id="worksheet-grid-search" type="text" value="${escapeHtml(this.searchQuery)}" oninput="app.handleGridSearch(this)" placeholder="Search all imported workbooks..." class="w-full pl-9 pr-8 py-2 bg-slate-950 border border-slate-700 rounded-lg text-xs sm:text-sm text-white" />
                 </div>
-                <button onclick="app.toggleGridModifiedFilter()" class="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium border ${this.filterModifiedOnly ? 'bg-amber-500/20 border-amber-500/40 text-amber-300' : 'bg-slate-950 border-slate-800 text-slate-400'}">Modified Only</button>
               </div>
               <div class="flex items-center gap-2 text-xs text-slate-400">
                 <div class="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-950 p-1">
@@ -8294,7 +8456,6 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
         this.activeSheetIdx = 0;
         this.activeView = 'settings';
         this.searchQuery = '';
-        this.filterModifiedOnly = false;
         this.undoStack = [];
         this.redoStack = [];
         this.bulkPreview = null;
@@ -8453,6 +8614,13 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
         const c = this.posConfig;
         container.innerHTML = `
           <div class="max-w-5xl mx-auto w-full space-y-5">
+            <section class="rounded-2xl p-4 sm:p-5 space-y-3" style="background:var(--uis-surface);border:1px solid var(--uis-line)">
+              <div>
+                <div class="text-base font-semibold">3D Adjuster</div>
+                <p class="text-xs mt-1" style="color:var(--uis-muted)">Adjust the 3D visual effect used across the workspace.</p>
+              </div>
+              <div id="uis-3d-settings-slot" class="flex items-center"></div>
+            </section>
             <section class="rounded-2xl p-4 sm:p-5 space-y-4" style="background:var(--uis-surface);border:1px solid var(--uis-line)">
               <div>
                 <div class="text-base font-semibold">POS Store, Tax & Receipt Configuration</div>
@@ -11076,12 +11244,25 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
     }catch(err){ document.body.classList.add('uis-no-webgl'); }
   }
 
+  function syncControlsLocation(){
+    var wrap=document.getElementById('uis-3d-controls');
+    var slot=document.getElementById('uis-3d-settings-slot');
+    if(!wrap) return;
+    if(slot){
+      if(wrap.parentNode!==slot) slot.appendChild(wrap);
+      wrap.style.display='flex';
+    } else {
+      // Keep the control node and its click handler alive while Settings is closed.
+      // Removing it here made it impossible to reattach after the first navigation.
+      wrap.style.display='none';
+      if(wrap.parentNode!==document.body) document.body.appendChild(wrap);
+    }
+  }
   function buildControls(){
-    if(document.getElementById('uis-3d-controls')) return;
+    if(document.getElementById('uis-3d-controls')) { syncControlsLocation(); return; }
     var wrap=document.createElement('div'); wrap.id='uis-3d-controls';
     wrap.innerHTML='<button id="uis-3d-toggle" type="button" title="HD Realistic 3D: Clear / Balanced / Focus / Off"><span class="uis-dot"></span><span id="uis-3d-toggle-label">HD REALISTIC: CLEAR</span></button>';
-    document.body.appendChild(wrap);
-    var btn=document.getElementById('uis-3d-toggle'); var label=document.getElementById('uis-3d-toggle-label');
+    var btn=wrap.querySelector('#uis-3d-toggle'); var label=wrap.querySelector('#uis-3d-toggle-label');
     function refresh(){ label.textContent='HD REALISTIC: '+mode.toUpperCase(); btn.classList.toggle('uis-active', mode!=='off'); }
     refresh();
     btn.addEventListener('click', function(){
@@ -11092,6 +11273,8 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
       if(mode==='off'){ document.body.classList.add('uis-no-webgl'); } else { document.body.classList.remove('uis-no-webgl'); }
       refresh();
     });
+    document.body.appendChild(wrap);
+    syncControlsLocation();
   }
   function rippleAt(el, e){
     if(mode==='off') return;
@@ -11102,7 +11285,7 @@ body[data-uis-3d="off"] #uis-3d-controls .uis-dot{ background:#64748b; box-shado
   document.addEventListener('pointerdown', function(e){ var b=e.target.closest && e.target.closest('button, [role="button"]'); if(!b) return; b.classList.add('uis-pressing'); if(b.tagName==='BUTTON' || b.getAttribute('role')==='button') rippleAt(b, e); }, true);
   document.addEventListener('pointerup', function(){ document.querySelectorAll('.uis-pressing').forEach(function(el){ el.classList.remove('uis-pressing'); }); }, true);
   document.addEventListener('pointercancel', function(){ document.querySelectorAll('.uis-pressing').forEach(function(el){ el.classList.remove('uis-pressing'); }); }, true);
-  function init(){ buildBehind(); buildControls(); }
+  function init(){ buildBehind(); buildControls(); var main=document.getElementById('main-view-container'); if(main && window.MutationObserver){ new MutationObserver(syncControlsLocation).observe(main,{childList:true,subtree:true}); } }
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', init, { once:true }); else init();
 })();
 </script>
