@@ -7765,6 +7765,17 @@ body.uis-drawer-open #inventory-hold-scan-button {
         const modal = document.getElementById('scan-item-modal');
         const d = this.getScannedItemDetails();
         if (!modal || !d) return;
+        // A scan result must have exactly one foreground dialog. Close/hide competing
+        // scanner and legacy modal layers before rendering the item details dialog.
+        ['orb-scanner-overlay','pos-camera-overlay','inventory-camera-overlay',
+         'disambiguation-modal','inventory-column-setup-modal','new-row-modal'].forEach(id => {
+          const other = document.getElementById(id);
+          if (other && other !== modal) {
+            other.classList.add('hidden');
+            if (id === 'orb-scanner-overlay') other.setAttribute('aria-hidden', 'true');
+          }
+        });
+        modal.setAttribute('aria-hidden', 'false');
         const qtyRef = d.qtyCol != null && d.qtyCol >= 0 ? `${colIndexToLetter(d.qtyCol)}${d.rec.rowNumber}` : '—';
         const posKey = `${this.lastScanResult.workbookIdx ?? this.activeWorkbookTabIndex ?? 0}:${this.lastScanResult.sheetIdx}:${d.rec.rowNumber}`;
         modal.innerHTML = `
@@ -14942,6 +14953,38 @@ body:has(.uis-dashboard) #secondary-stage-header{display:none!important}
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', init, { once:true }); else init();
 })();
 </script>
+
+
+<style id="uis-unified-modal-backdrop-v9">
+/* One consistent glass backdrop for every full-screen popup/dialog. These rules
+   intentionally come last so global transparent-surface themes cannot disable blur. */
+:root { --uis-modal-dim: rgba(2, 7, 16, .62); }
+body > [role="dialog"],
+body > .modal-backdrop,
+body > .popup-overlay,
+body > .uis-modal-overlay,
+#scan-item-modal, #disambiguation-modal, #new-row-modal,
+#inventory-column-setup-modal, #orb-scanner-overlay,
+#pos-camera-overlay, #inventory-camera-overlay {
+  background: var(--uis-modal-dim) !important;
+  background-color: var(--uis-modal-dim) !important;
+  background-image: none !important;
+  -webkit-backdrop-filter: blur(18px) saturate(135%) !important;
+  backdrop-filter: blur(18px) saturate(135%) !important;
+  isolation: isolate !important;
+}
+#scan-item-modal > *, #disambiguation-modal > *, #new-row-modal > *,
+#inventory-column-setup-modal > *, #orb-scanner-overlay .orb-scanner-card,
+#pos-camera-overlay .pos-camera-card, #inventory-camera-overlay .inventory-camera-card,
+[role="dialog"] > *, .modal-content, .popup-card {
+  background-color: rgba(8, 14, 27, .94) !important;
+  -webkit-backdrop-filter: blur(10px) saturate(125%) !important;
+  backdrop-filter: blur(10px) saturate(125%) !important;
+}
+#scan-item-modal.hidden, #disambiguation-modal.hidden, #new-row-modal.hidden,
+#inventory-column-setup-modal.hidden, #orb-scanner-overlay.hidden,
+#pos-camera-overlay.hidden, #inventory-camera-overlay.hidden { display: none !important; }
+</style>
 
 </body>
 </html>
