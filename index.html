@@ -4102,6 +4102,58 @@ body.uis-drawer-open #inventory-hold-scan-button {
       'berry-velvet': { name:'Berry Velvet', description:'Deep berry workspace with bright rose highlights.', colors:['#1c101b','#3b2638','#f09ac0','#fff5fa'] }
     };
 
+    /* Shared Orb barcode engine: one format/decoder implementation for both POS and Inventory modes. */
+    const UISSharedBarcodeEngine = {
+      formats: ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf'],
+      async create() {
+        const out = { detector:null, reader:null, decoder:'NONE' };
+        if (typeof window.BarcodeDetector === 'function') {
+          try {
+            const supported = await window.BarcodeDetector.getSupportedFormats();
+            const usable = this.formats.filter(format => supported.includes(format));
+            if (usable.length) { out.detector = new window.BarcodeDetector({ formats:usable }); out.decoder = 'NATIVE'; }
+          } catch (_) {}
+        }
+        if (out.decoder === 'NONE' && window.ZXing?.MultiFormatReader) {
+          try {
+            const Z = window.ZXing, hints = new Map();
+            hints.set(Z.DecodeHintType.POSSIBLE_FORMATS, [Z.BarcodeFormat.EAN_13,Z.BarcodeFormat.EAN_8,Z.BarcodeFormat.UPC_A,Z.BarcodeFormat.UPC_E,Z.BarcodeFormat.CODE_128,Z.BarcodeFormat.CODE_39,Z.BarcodeFormat.ITF].filter(Boolean));
+            hints.set(Z.DecodeHintType.TRY_HARDER, true);
+            out.reader = new Z.MultiFormatReader(); out.reader.setHints(hints); out.decoder = 'ZXING';
+          } catch (_) {}
+        }
+        if (out.decoder === 'NONE') throw new Error('Barcode scanning is not supported: neither native BarcodeDetector nor ZXing is available.');
+        return out;
+      },
+      async decode(session, video, canvas, ctx, roi) {
+        const width = video.videoWidth, height = video.videoHeight;
+        if (!width || !height) return '';
+        let x=0,y=0,w=width,h=height;
+        if (roi && Number.isFinite(roi.x) && Number.isFinite(roi.y) && Number.isFinite(roi.width) && Number.isFinite(roi.height)) {
+          x=Math.max(0,Math.floor(roi.x*width)); y=Math.max(0,Math.floor(roi.y*height));
+          w=Math.max(1,Math.min(width-x,Math.floor(roi.width*width))); h=Math.max(1,Math.min(height-y,Math.floor(roi.height*height)));
+        }
+        canvas.width=w; canvas.height=h; ctx.drawImage(video,x,y,w,h,0,0,w,h);
+        if (session.detector) {
+          const hits=await session.detector.detect(canvas);
+          const hit=hits.find(item=>item.rawValue && this.formats.includes(String(item.format||'').toLowerCase()));
+          return hit ? String(hit.rawValue).trim() : '';
+        }
+        if (session.reader) {
+          try {
+            const Z=window.ZXing, rgba=ctx.getImageData(0,0,w,h).data, n=w*h, luminance=new Uint8ClampedArray(n);
+            for(let i=0,j=0;i<n;i++,j+=4) luminance[i]=(rgba[j]*77+rgba[j+1]*150+rgba[j+2]*29)>>8;
+            const source=new Z.PlanarYUVLuminanceSource(luminance,w,h,0,0,w,h,false);
+            const result=session.reader.decodeWithState(new Z.BinaryBitmap(new Z.HybridBinarizer(source)));
+            session.reader.reset();
+            return result ? String(result.getText()||'').trim() : '';
+          } catch (_) { try { session.reader.reset(); } catch (_) {} return ''; }
+        }
+        return '';
+      },
+      release(session) { try { session?.reader?.reset(); } catch (_) {} }
+    };
+
     const app = {
       currentTheme: 'warm-sand',
       workbook: null,
@@ -4189,6 +4241,7 @@ body.uis-drawer-open #inventory-hold-scan-button {
       _scanActive: false, _scanRaf: null, _scanRoi: null, _scanLocked: false, _scanMisses: 0, _scanLastCode: '', _scanLastAt: 0, _scanLastFrameAt: 0,
       _scanPurpose: 'inventory', _scanHoldActive: false, _scanHostId: 'fflz-barcode-reader', _scanOverlayId: 'fflz-scan-overlay',
       _inventoryHoldActive: false, _inventoryHoldPointerId: null, _inventoryHoldListenersReady: false, _inventoryHoldGeneration: 0,
+      _orbScanGeneration: 0, _orbScanActive: false, _orbScanMode: 'inventory', _orbScanState: 'IDLE', _orbScanStream: null, _orbScanVideo: null, _orbScanCanvas: null, _orbScanCtx: null, _orbScanDetector: null, _orbScanReader: null, _orbScanDecoder: 'NONE', _orbScanRaf: null, _orbScanBusy: false, _orbScanLocked: false, _orbScanMisses: 0, _orbScanLastCode: '', _orbScanLastAt: 0, _orbScanLastFrameAt: 0, _orbScanTorchSupported: false, _orbScanTorchOn: false, _orbHoldPointerId: null,
       _posScanHoldActive: false, _posScanStream: null, _posScanVideo: null, _posScanDetector: null, _posScanReader: null, _posScanDecoder: 'NONE', _posScanCanvas: null, _posScanCtx: null, _posScanRaf: null, _posScanGeneration: 0, _posScanBusy: false, _posScanLocked: false, _posScanMisses: 0, _posScanLastCode: '', _posScanLastAt: 0, _posHoldPointerId: null, _posHoldListenersReady: false,
       _wedgeBuffer: '', _wedgeLastKeyAt: 0,
       lastScannedCode: { code: '', time: 0 },
@@ -5916,6 +5969,7 @@ body.uis-drawer-open #inventory-hold-scan-button {
 
       syncMainInventoryHoldScanButton() {
         this.installHoldScanSelectionGuard();
+        if (this._orbScanActive && this.activeView !== 'pos' && this.activeView !== 'scanner') this.closeOrbScanner();
         // Floating orb REMOVED on Barcode Scanner - background orb now opens the SEPARATE Orb Scanner. Inventory keeps its own Scan button / hold scanner.
         // Never create the floating button; remove it if an older build left one behind.
         const _oldInvBtn = document.getElementById('inventory-hold-scan-button');
@@ -5970,43 +6024,90 @@ body.uis-drawer-open #inventory-hold-scan-button {
       },
 
       // ======================================================================
-      // ORB SCANNER - SEPARATE from POS scanner and Inventory scanner.
-      // Own overlay, own camera stream, own decode loop, own state (_orbScan*).
-      // It NEVER writes to the POS cart or Inventory stock by itself.
-      // A scan only shows a result card - the user then chooses:
-      //   Add to sale (POS) / View in Inventory / Copy / Scan again / Close.
+      // ORB SCANNER - one shared camera/decoder engine with isolated POS and Inventory processing.
+      // The active view is captured once per hold session; mode-specific actions never cross over.
       // Opened by HOLDING the background 3D orb on POS or Barcode Scanner pages.
-      // Releasing the orb does NOT close it - it stays open until Close / backdrop.
+      // HOLD = camera open. RELEASE = camera closes.
+      // SUCCESS (one unambiguous match) = apply + auto-close:
+      //   POS -> Add to sale. Barcode Scanner -> View in Inventory.
+      // NOT FOUND = toast + auto-close. COLLISION (2+ products share the
+      // barcode) = camera stops, picker stays so you can choose.
+      // CAMERA ERROR = error card stays so you can Retry / Close.
       // ======================================================================
+      setOrbScannerState(state, message) {
+        this._orbScanState = state;
+        const status = document.getElementById('orb-scanner-status');
+        if (status && message) status.textContent = message;
+        const overlay = document.getElementById('orb-scanner-overlay');
+        if (overlay) overlay.dataset.scannerState = state;
+      },
+      async setOrbScannerTorch(enabled) {
+        const track = this._orbScanStream?.getVideoTracks?.()[0];
+        if (!track || !this._orbScanTorchSupported) return false;
+        try { await track.applyConstraints({ advanced:[{ torch:!!enabled }] }); this._orbScanTorchOn=!!enabled; return true; }
+        catch (_) { this._orbScanTorchSupported=false; this._orbScanTorchOn=false; return false; }
+      },
+
       async beginOrbHoldScan(event) {
-        if (this.activeView !== 'pos' && this.activeView !== 'scanner') return;
-        if (!this.workbook) { this.showToast('Import a workbook before scanning.', 'error'); return; }
-        if (this._orbScanActive) return;
+        if (this.activeView !== 'pos' && this.activeView !== 'scanner') {
+          this.showToast('Orb scanning is available on POS and Barcode Scanner views.', 'error');
+          return false;
+        }
+        if (!this.workbook) { this.showToast('Import a workbook before scanning.', 'error'); return false; }
+        if (this._orbScanActive) return true;
         if (this._posScanHoldActive || this._inventoryHoldActive || this.isScannerOpen) {
-          this.showToast('Another scanner is already open. Close it first, then hold the orb.', 'error');
-          return;
+          this.showToast('Close the other camera scanner before using the Orb scanner.', 'error');
+          return false;
         }
         event?.preventDefault?.();
         this._orbScanActive = true;
+        this._orbScanMode = this.activeView === 'pos' ? 'pos' : 'inventory';
         this._orbScanOriginView = this.activeView;
+        this.setOrbScannerState('ACTIVATING', 'Opening camera…');
         this._orbScanLastCode = '';
         this._orbScanLastAt = 0;
         this._orbScanResult = null;
         this._orbScanChoices = null;
         this._orbScanPaused = false;
+        this._orbScanResultOpen = false;
+        this._orbScanErrorOpen = false;
+        await this.startOrbCameraScanner();
+        return true;
+      },
+      async endOrbHoldScan(pointerId = null) {
+        if (pointerId != null && this._orbHoldPointerId != null && pointerId !== this._orbHoldPointerId) return;
+        this._orbHoldPointerId = null;
+        await this.closeOrbScanner();
+      },
+      async orbRetryScan() {
+        if (!this._orbScanActive) return;
+        this._orbScanErrorOpen = false;
+        this._orbScanResultOpen = false;
         await this.startOrbCameraScanner();
       },
-
-      async endOrbHoldScan() { await this.closeOrbScanner(); },
-
+      stopOrbCameraStreamOnly() {
+        /* Camera off, overlay stays (collision picker). Loop stays paused. */
+        ++this._orbScanGeneration;
+        this._orbScanPaused = true;
+        if (this._orbScanRaf) cancelAnimationFrame(this._orbScanRaf);
+        this._orbScanRaf = null;
+        if (this._orbScanStream) this._orbScanStream.getTracks().forEach(track => { try { track.stop(); } catch (_) {} });
+        this._orbScanStream = null;
+        if (this._orbScanVideo) { try { this._orbScanVideo.pause(); this._orbScanVideo.srcObject = null; } catch (_) {} }
+        this._orbScanVideo = null;
+        this._orbScanDetector = null;
+        UISSharedBarcodeEngine.release({ reader:this._orbScanReader });
+        this._orbScanReader = null;
+        this._orbScanCanvas = null; this._orbScanCtx = null; this._orbScanDecoder = 'NONE';
+        this._orbScanBusy = false; this._orbScanLocked = false; this._orbScanTorchSupported=false; this._orbScanTorchOn=false;
+      },
       async startOrbCameraScanner() {
-        if (this._orbScanStream) return;
         const generation = ++this._orbScanGeneration;
         let modal = document.getElementById('orb-scanner-overlay');
         if (!modal) {
           modal = document.createElement('div');
           modal.id = 'orb-scanner-overlay';
-          modal.innerHTML = `<div class="orb-scanner-card"><div class="flex items-start justify-between gap-3 mb-3"><div><div class="text-[10px] uppercase tracking-[.18em] text-violet-300 font-bold">Orb Scanner &middot; separate</div><div id="orb-scanner-status" class="text-sm font-semibold text-white mt-1">Requesting camera permission&hellip;</div></div><button type="button" onclick="app.closeOrbScanner()" aria-label="Close Orb Scanner" class="camera-overlay-close">&times;</button></div><div id="orb-scanner-reader"><video id="orb-scanner-video" autoplay muted playsinline></video></div><div id="orb-scanner-result" class="hidden mt-3"></div><div class="text-center text-[11px] text-neutral-400 mt-3">Orb Scanner is separate &mdash; it does not add to sale or change stock until you choose an action.</div></div>`;
+          modal.innerHTML = `<div class="orb-scanner-card"><div class="flex items-start justify-between gap-3 mb-3"><div><div class="text-[10px] uppercase tracking-[.18em] text-violet-300 font-bold">Orb Scanner &middot; separate</div><div id="orb-scanner-status" class="text-sm font-semibold text-white mt-1">Opening camera&hellip;</div></div><button type="button" onclick="app.closeOrbScanner()" aria-label="Close Orb Scanner" class="camera-overlay-close">&times;</button></div><div id="orb-scanner-reader"><video id="orb-scanner-video" autoplay muted playsinline></video></div><div id="orb-scanner-result" class="hidden mt-3"></div><div class="text-center text-[11px] text-neutral-400 mt-3">Hold the orb to scan &mdash; release to close.</div></div>`;
           document.body.appendChild(modal);
           modal.addEventListener('click', (e) => { if (e.target === modal) this.closeOrbScanner(); });
         }
@@ -6017,109 +6118,148 @@ body.uis-drawer-open #inventory-hold-scan-button {
         const readerEl = document.getElementById('orb-scanner-reader');
         if (resultEl) { resultEl.classList.add('hidden'); resultEl.innerHTML = ''; }
         if (readerEl) readerEl.classList.remove('hidden');
+        this._orbScanErrorOpen = false;
+        /* Reuse a live stream instead of asking for the camera again. */
+        if (this._orbScanStream) {
+          if (status) status.textContent = 'Scanning';
+          this._orbScanVideo = video;
+          try { video.srcObject = this._orbScanStream; video.muted = true; video.playsInline = true; await video.play().catch(() => {}); } catch (_) {}
+          if (generation !== this._orbScanGeneration || !this._orbScanActive) return;
+          this._orbScanPaused = false;
+          this._orbScanLoop(generation);
+          return;
+        }
+        /* Call getUserMedia directly from the hold interaction. Mobile browsers
+           inconsistently implement Permissions.query({name:'camera'}); it must
+           not delay the actual camera permission request. */
+        if (generation !== this._orbScanGeneration || !this._orbScanActive) return;
+        if (status) status.textContent = 'Requesting camera permission…';
         try {
           if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) throw new Error('Camera access is blocked in this page context. Open the app over HTTPS or localhost, then allow camera permission.');
-          const stream = await navigator.mediaDevices.getUserMedia({ audio:false, video:{ facingMode:{ ideal:'environment' }, width:{ ideal:1280 }, height:{ ideal:720 } } });
+          let timedOut = false;
+          const targetSize = this._orbScanMode === 'inventory' ? { width:{ ideal:1920 }, height:{ ideal:1080 } } : { width:{ ideal:1280 }, height:{ ideal:720 } };
+          const gumPromise = navigator.mediaDevices.getUserMedia({ audio:false, video:{ facingMode:{ ideal:'environment' }, ...targetSize } });
+          /* If we time out / get cancelled (release), a late-resolving stream must be stopped, not left running. */
+          gumPromise.then(s => { if (timedOut || generation !== this._orbScanGeneration || !this._orbScanActive) { try { s.getTracks().forEach(t => t.stop()); } catch (_) {} } }).catch(() => {});
+          const stream = await Promise.race([
+            gumPromise,
+            new Promise((_, reject) => setTimeout(() => { timedOut = true; reject(new Error('Camera is taking too long to open. Tap Retry.')); }, 10000))
+          ]);
           if (generation !== this._orbScanGeneration || !this._orbScanActive) { stream.getTracks().forEach(track => { try { track.stop(); } catch (_) {} }); return; }
           this._orbScanStream = stream;
           this._orbScanVideo = video;
           video.srcObject = stream;
-          await video.play();
+          video.muted = true; video.playsInline = true;
+          try { await video.play(); } catch (playError) { throw new Error('The camera opened but video playback could not start.'); }
+          if (video.readyState < 2) await new Promise((resolve,reject)=>{
+            const timer=setTimeout(()=>reject(new Error('Camera video did not become ready.')),8000);
+            video.addEventListener('loadeddata',()=>{clearTimeout(timer);resolve();},{once:true});
+            video.addEventListener('error',()=>{clearTimeout(timer);reject(new Error('Camera video stream failed.'));},{once:true});
+          });
           if (generation !== this._orbScanGeneration || !this._orbScanActive) { await this.stopOrbCameraScanner(); return; }
           this._orbScanCanvas = document.createElement('canvas');
           this._orbScanCtx = this._orbScanCanvas.getContext('2d', { willReadFrequently:true });
-          this._orbScanDetector = null;
-          this._orbScanReader = null;
-          this._orbScanDecoder = 'NONE';
-          const formats = ['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf'];
-          if (typeof window.BarcodeDetector === 'function') {
-            try {
-              const supported = await window.BarcodeDetector.getSupportedFormats();
-              const usable = formats.filter(format => supported.includes(format));
-              if (usable.length) { this._orbScanDetector = new window.BarcodeDetector({ formats:usable }); this._orbScanDecoder = 'NATIVE'; }
-            } catch (_) {}
-          }
-          if (this._orbScanDecoder === 'NONE' && window.ZXing?.MultiFormatReader) {
-            try {
-              const Z = window.ZXing, hints = new Map();
-              hints.set(Z.DecodeHintType.POSSIBLE_FORMATS, [Z.BarcodeFormat.EAN_13,Z.BarcodeFormat.EAN_8,Z.BarcodeFormat.UPC_A,Z.BarcodeFormat.UPC_E,Z.BarcodeFormat.CODE_128,Z.BarcodeFormat.CODE_39,Z.BarcodeFormat.ITF].filter(Boolean));
-              hints.set(Z.DecodeHintType.TRY_HARDER, true);
-              this._orbScanReader = new Z.MultiFormatReader();
-              this._orbScanReader.setHints(hints);
-              this._orbScanDecoder = 'ZXING';
-            } catch (_) {}
-          }
-          if (this._orbScanDecoder === 'NONE') throw new Error('No barcode decoder is available.');
-          if (status) status.textContent = `Scanning \u00b7 ${this._orbScanDecoder === 'NATIVE' ? 'Browser decoder' : 'ZXing decoder'}`;
+          if (!this._orbScanCtx) throw new Error('This browser could not initialize the scanner image buffer.');
+          const decoderSession = await UISSharedBarcodeEngine.create();
+          if (generation !== this._orbScanGeneration || !this._orbScanActive) { UISSharedBarcodeEngine.release(decoderSession); await this.stopOrbCameraScanner(); return; }
+          this._orbScanDetector = decoderSession.detector;
+          this._orbScanReader = decoderSession.reader;
+          this._orbScanDecoder = decoderSession.decoder;
+          const track = stream.getVideoTracks?.()[0];
+          try { const caps=track?.getCapabilities?.(); this._orbScanTorchSupported=!!caps?.torch; } catch (_) { this._orbScanTorchSupported=false; }
+          if (track) track.addEventListener('ended', () => {
+            if (generation !== this._orbScanGeneration || !this._orbScanActive) return;
+            this.setOrbScannerState('ERROR', 'Camera connection ended. Release and try again.');
+            this.stopOrbCameraStreamOnly();
+            this._orbScanErrorOpen=true;
+            const result=document.getElementById('orb-scanner-result');
+            if(result){ result.innerHTML='<div class="text-sm font-bold text-white">Camera disconnected</div><div class="text-xs text-neutral-400 mt-1">The camera stopped unexpectedly. Close the scanner and try again.</div>'; result.classList.remove('hidden'); }
+          }, { once:true });
+          this._orbScanLastFrameAt=0;
+          this.setOrbScannerState('ACTIVE_SCANNING', `Scanning · ${this._orbScanDecoder === 'NATIVE' ? 'Browser decoder' : 'ZXing decoder'}`);
           this._orbScanLocked = false;
           this._orbScanMisses = 0;
           this._orbScanPaused = false;
           this._orbScanLoop(generation);
         } catch (error) {
           if (generation !== this._orbScanGeneration || !this._orbScanActive) return;
-          this.showToast(`Orb Scanner: ${error?.message || 'Camera permission was denied.'}`, 'error');
-          await this.stopOrbCameraScanner();
+          const msg = error?.message || 'Camera permission was denied.';
+          // A partial initialization must never leave a live camera or decoder behind.
+          this.stopOrbCameraStreamOnly();
+          this._orbScanErrorOpen = true;
+          this.setOrbScannerState('ERROR', 'Camera didn’t open');
+          if (status) status.textContent = 'Camera didn\u2019t open';
+          if (resultEl) {
+            resultEl.innerHTML = `<div class="space-y-3"><div class="text-sm font-bold text-white">Camera didn\u2019t open</div><div class="text-xs text-neutral-400">${escapeHtml(msg)}</div><div class="grid grid-cols-2 gap-2"><button type="button" onclick="app.orbRetryScan()" class="orb-scan-btn orb-scan-btn-primary">Retry</button><button type="button" onclick="app.closeOrbScanner()" class="orb-scan-btn orb-scan-btn-ghost">Close</button></div></div>`;
+            resultEl.classList.remove('hidden');
+          }
+          if (readerEl) readerEl.classList.add('hidden');
+          this.showToast(`Orb Scanner: ${msg}`, 'error');
         }
       },
-
       async _orbScanLoop(generation) {
         if (!this._orbScanActive || this._orbScanPaused || generation !== this._orbScanGeneration || !this._orbScanStream) return;
-        const video = this._orbScanVideo;
-        if (!this._orbScanBusy && video?.readyState >= 2 && video.videoWidth) {
-          this._orbScanBusy = true;
+        const video=this._orbScanVideo, mode=this._orbScanMode;
+        const interval=mode==='inventory' ? 95 : 70;
+        const nowFrame=(typeof performance!=='undefined' ? performance.now() : Date.now());
+        if (!this._orbScanBusy && video?.readyState>=2 && video.videoWidth && nowFrame-this._orbScanLastFrameAt>=interval) {
+          this._orbScanBusy=true; this._orbScanLastFrameAt=nowFrame;
           try {
-            const canvas = this._orbScanCanvas, ctx = this._orbScanCtx;
-            canvas.width = video.videoWidth; canvas.height = video.videoHeight;
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            let code = '';
-            if (this._orbScanDecoder === 'NATIVE' && this._orbScanDetector) {
-              const detections = await this._orbScanDetector.detect(canvas);
-              const hit = detections.find(item => item.rawValue && !String(item.format).toLowerCase().includes('qr'));
-              if (hit) code = String(hit.rawValue).trim();
-            } else if (this._orbScanDecoder === 'ZXING' && this._orbScanReader) {
-              try {
-                const Z = window.ZXing, image = ctx.getImageData(0,0,canvas.width,canvas.height), rgba = image.data;
-                const n = canvas.width * canvas.height, luminance = new Uint8ClampedArray(n);
-                for (let i=0,j=0;i<n;i++,j+=4) luminance[i] = (rgba[j]*77 + rgba[j+1]*150 + rgba[j+2]*29) >> 8;
-                const source = new Z.PlanarYUVLuminanceSource(luminance,canvas.width,canvas.height,0,0,canvas.width,canvas.height,false);
-                const result = this._orbScanReader.decodeWithState(new Z.BinaryBitmap(new Z.HybridBinarizer(source)));
-                this._orbScanReader.reset();
-                if (result && result.getBarcodeFormat?.() !== Z.BarcodeFormat.QR_CODE) code = String(result.getText() || '').trim();
-              } catch (_) { try { this._orbScanReader?.reset(); } catch (_) {} }
-            }
-            if (generation !== this._orbScanGeneration || !this._orbScanActive || this._orbScanPaused) return;
+            const session={ detector:this._orbScanDetector, reader:this._orbScanReader };
+            const code=await UISSharedBarcodeEngine.decode(session,video,this._orbScanCanvas,this._orbScanCtx,this._scanRoi);
+            if (generation!==this._orbScanGeneration || !this._orbScanActive || this._orbScanPaused) return;
             if (code) {
-              this._orbScanMisses = 0;
-              const normalized = normalizeCodeString(code);
-              if (!this._orbScanLocked || (normalized !== this._orbScanLastCode && Date.now() - this._orbScanLastAt > 900)) {
-                this._orbScanLocked = true;
-                this._orbScanPaused = true;
-                this.handleOrbScannedBarcode(code);
-                return;
+              this._orbScanMisses=0;
+              const normalized=normalizeCodeString(code);
+              const duplicate=normalized===this._orbScanLastCode && Date.now()-this._orbScanLastAt<1400;
+              const changedBarcode = normalized && normalized !== this._orbScanLastCode && Date.now()-this._orbScanLastAt>900;
+              if ((!this._orbScanLocked || changedBarcode) && !duplicate) {
+                this._orbScanLocked=true;
+                this.setOrbScannerState('BARCODE_DETECTED', 'Barcode detected');
+                const outcome=this.handleOrbScannedBarcode(code);
+                if (mode==='pos' && (outcome==='pos-added' || outcome==='pos-notfound')) {
+                  // POS stays live while the hold is maintained. Lock clears only after misses.
+                  if (outcome==='pos-added') this.setOrbScannerState('SUCCESS','Added one unit · keep holding to scan another');
+                  else this.setOrbScannerState('NOT_FOUND','Product not found · keep holding to scan another');
+                } else if (outcome==='ignored') {
+                  this._orbScanLocked=false;
+                  this.setOrbScannerState('ACTIVE_SCANNING','Scanning');
+                } else {
+                  this._orbScanPaused=true;
+                  return;
+                }
               }
-            } else if (++this._orbScanMisses >= 5) this._orbScanLocked = false;
-          } catch (_) {} finally { this._orbScanBusy = false; }
+            } else if (++this._orbScanMisses>=10) {
+              this._orbScanLocked=false;
+              if (mode==='pos') this.setOrbScannerState('ACTIVE_SCANNING','Scanning · POS');
+            }
+          } catch (error) {
+            if (generation===this._orbScanGeneration && this._orbScanActive) this.setOrbScannerState('ERROR',error?.message||'Barcode detection failed');
+          } finally { this._orbScanBusy=false; }
         }
-        if (this._orbScanActive && !this._orbScanPaused && generation === this._orbScanGeneration) {
-          this._orbScanRaf = requestAnimationFrame(() => this._orbScanLoop(generation));
-        }
+        if (this._orbScanActive && !this._orbScanPaused && generation===this._orbScanGeneration) this._orbScanRaf=requestAnimationFrame(()=>this._orbScanLoop(generation));
       },
 
       handleOrbScannedBarcode(rawBarcodeString) {
         const code = normalizeCodeString(rawBarcodeString);
-        if (!code) return false;
+        if (!code) return 'ignored';
         const now = Date.now();
-        if (code === this._orbScanLastCode && now - (this._orbScanLastAt || 0) < 900) return false;
+        if (code === this._orbScanLastCode && now - (this._orbScanLastAt || 0) < 900) return 'ignored';
         this._orbScanLastCode = code;
         this._orbScanLastAt = now;
-        try { if (navigator.vibrate) navigator.vibrate(45); } catch (_) {}
+        try { if (navigator.vibrate) navigator.vibrate(60); } catch (_) {}
         const match = findByBarcode(code, this.codeIndex || this.inventoryCodeIndex);
         if (!match?.products?.length) {
-          this._orbScanResult = { code, notFound:true };
-          this._orbScanChoices = null;
           playScanSound('error');
-          this.renderOrbScanResult();
-          return false;
+          if (this._orbScanMode === 'pos') {
+            this.setOrbScannerState('NOT_FOUND', `Product not found · ${code}`);
+            this.showToast(`POS: product not found (${code}). No cart item was added.`, 'error');
+            return 'pos-notfound';
+          }
+          this.setOrbScannerState('NOT_FOUND', `Barcode not found · ${code}`);
+          this.showToast(`Barcode not in workbook (${code}).`, 'error');
+          this.closeOrbScanner();
+          return 'notfound';
         }
         if (match.products.length > 1) {
           this._orbScanResult = { code, collision:true, count: match.products.length };
@@ -6130,25 +6270,54 @@ body.uis-drawer-open #inventory-hold-scan-button {
             workbookName: String(product.workbookName || ''),
             sheetName: String(product.sheetName || '')
           }));
+          this._orbScanResultOpen = true;
           playScanSound('collision');
           this.renderOrbScanResult();
-          return true;
+          this.stopOrbCameraStreamOnly();
+          return 'collision';
         }
         const product = match.products[0];
         const key = `${product.workbookIdx ?? 0}:${product.sheetIdx}:${product.rowNumber}`;
         const item = this.getOperationItem(key);
         if (!item) {
-          this._orbScanResult = { code, notFound:true, reason:'Matched inventory row is unavailable.' };
-          this._orbScanChoices = null;
           playScanSound('error');
-          this.renderOrbScanResult();
-          return false;
+          this.showToast('Matched inventory row is unavailable.', 'error');
+          this.closeOrbScanner();
+          return 'notfound';
         }
         this._orbScanResult = { code, item, key, product, matchedColumn: String(product.matchedColumnName || 'Barcode') };
         this._orbScanChoices = null;
         playScanSound('success');
-        this.renderOrbScanResult();
-        return true;
+        if (this._orbScanMode === 'pos') {
+          if (!Number.isFinite(item.qty) || item.qty <= 0) {
+            this.setOrbScannerState('NOT_FOUND', `${item.itemName || 'Product'} is out of stock`);
+            this.showToast(`POS: ${item.itemName} is out of stock.`, 'error');
+            return 'pos-notfound';
+          }
+          this.orbAddToSale(String(key), { skipRender:true });
+          this.setOrbScannerState('SUCCESS', `Added one unit · ${item.itemName || 'Product'}`);
+          this.showToast(`Added one unit to sale: ${item.itemName}.`, 'success');
+          return 'pos-added';
+        }
+        this.setOrbScannerState('SUCCESS', 'Inventory match found');
+        this.orbApplySingleMatch(key);
+        return 'applied';
+      },
+
+      async orbApplySingleMatch(key) {
+        const item = this.getOperationItem(String(key));
+        if (!item) { this.showToast('That inventory row is no longer available.', 'error'); await this.closeOrbScanner(); return; }
+        if (this._orbScanOriginView === 'scanner') {
+          await this.orbViewInInventory(String(key));
+          return;
+        }
+        if (!Number.isFinite(item.qty) || item.qty <= 0) {
+          this.showToast(`${item.itemName} is out of stock.`, 'error');
+          await this.closeOrbScanner();
+          return;
+        }
+        this.orbAddToSale(String(key), { skipRender:true });
+        await this.closeOrbScanner();
       },
 
       renderOrbScanResult() {
@@ -6201,12 +6370,27 @@ body.uis-drawer-open #inventory-hold-scan-button {
         if (!item) { this.showToast('That inventory row is no longer available.', 'error'); return; }
         this._orbScanResult = { code: this._orbScanResult?.code || '', item, key: String(key), product: choice, matchedColumn: choice.matchedColumn || 'Barcode' };
         this._orbScanChoices = null;
-        this.renderOrbScanResult();
+        this._orbScanResultOpen = false;
+        if (this._orbScanMode === 'pos') {
+          if (!Number.isFinite(item.qty) || item.qty <= 0) { this.showToast(`${item.itemName} is out of stock.`, 'error'); return; }
+          this.orbAddToSale(String(key), { skipRender:true });
+          this.showToast(`Added one unit to sale: ${item.itemName}.`, 'success');
+          this._orbScanResult = null;
+          this._orbScanLocked = true;
+          this._orbScanPaused = false;
+          const result=document.getElementById('orb-scanner-result'); if(result){result.classList.add('hidden');result.innerHTML='';}
+          const reader=document.getElementById('orb-scanner-reader'); if(reader) reader.classList.remove('hidden');
+          this.setOrbScannerState('SUCCESS','Added one unit · keep holding to scan another');
+          if (this._orbScanActive && this._orbScanStream) this._orbScanLoop(this._orbScanGeneration);
+          else if (this._orbScanActive) this.startOrbCameraScanner();
+        } else this.orbApplySingleMatch(String(key));
       },
 
       orbScanAgain() {
         this._orbScanResult = null;
         this._orbScanChoices = null;
+        this._orbScanResultOpen = false;
+        this._orbScanErrorOpen = false;
         this._orbScanLastCode = '';
         this._orbScanLastAt = 0;
         this._orbScanLocked = false;
@@ -6233,14 +6417,14 @@ body.uis-drawer-open #inventory-hold-scan-button {
         }
       },
 
-      orbAddToSale(key) {
+      orbAddToSale(key, opts = {}) {
         const item = this.getOperationItem(String(key));
         if (!item) { this.showToast('That inventory row is no longer available.', 'error'); return; }
         if (!Number.isFinite(item.qty) || item.qty <= 0) { this.showToast(`${item.itemName} is out of stock.`, 'error'); return; }
         this.addPosItem(item.key);
         playScanSound('success');
         this.showToast(`Added to sale: ${item.itemName}.`, 'success');
-        this.renderOrbScanResult();
+        if (!opts.skipRender) this.renderOrbScanResult();
       },
 
       async orbViewInInventory(key) {
@@ -6261,6 +6445,9 @@ body.uis-drawer-open #inventory-hold-scan-button {
         ++this._orbScanGeneration;
         this._orbScanActive = false;
         this._orbScanPaused = false;
+        this._orbScanResultOpen = false;
+        this._orbScanErrorOpen = false;
+        this._orbHoldPointerId = null;
         if (!this._posScanHoldActive && !this._inventoryHoldActive) document.body.classList.remove('hold-scan-active');
         if (this._orbScanRaf) cancelAnimationFrame(this._orbScanRaf);
         this._orbScanRaf = null;
@@ -6269,11 +6456,14 @@ body.uis-drawer-open #inventory-hold-scan-button {
         if (this._orbScanVideo) { try { this._orbScanVideo.pause(); this._orbScanVideo.srcObject = null; } catch (_) {} }
         this._orbScanVideo = null;
         this._orbScanDetector = null;
-        try { this._orbScanReader?.reset(); } catch (_) {}
+        UISSharedBarcodeEngine.release({ reader:this._orbScanReader });
         this._orbScanReader = null;
         this._orbScanCanvas = null; this._orbScanCtx = null; this._orbScanDecoder = 'NONE';
         this._orbScanBusy = false; this._orbScanLocked = false; this._orbScanMisses = 0;
+        this._orbScanLastCode=''; this._orbScanLastAt=0; this._orbScanLastFrameAt=0;
+        this._orbScanTorchSupported=false; this._orbScanTorchOn=false;
         this._orbScanResult = null; this._orbScanChoices = null;
+        this.setOrbScannerState('STOPPED','Scanner stopped');
         const modal = document.getElementById('orb-scanner-overlay');
         if (modal) modal.classList.add('hidden');
         const resultEl = document.getElementById('orb-scanner-result');
@@ -6282,6 +6472,7 @@ body.uis-drawer-open #inventory-hold-scan-button {
 
       syncPosHoldScanButton() {
         this.installHoldScanSelectionGuard();
+        if (this._orbScanActive && this.activeView !== 'pos' && this.activeView !== 'scanner') this.closeOrbScanner();
         this.syncPosHeaderControls();
         // Floating orb REMOVED on POS - background orb now opens the SEPARATE Orb Scanner. POS keeps its own header Scan button.
         // Never create the floating button; remove it if an older build left one behind.
@@ -7413,7 +7604,10 @@ body.uis-drawer-open #inventory-hold-scan-button {
         e.preventDefault();
         const input = document.getElementById('manual-barcode-input');
         if (!input || !input.value.trim()) return;
-        this.handleProcessScannedBarcode(input.value);
+        const code=input.value.trim();
+        if (!code) { this.showToast('Enter a barcode first.','error'); return; }
+        if (this.activeView === 'pos') this.handlePosScannedBarcode(code);
+        else this.handleProcessScannedBarcode(code);
         input.value = '';
       },
 
@@ -12210,6 +12404,8 @@ body.uis-drawer-open #inventory-hold-scan-button {
   }
 
   function buildBehind(){
+    if(window.__uisBehindBuilding || window.__uisBehindBuilt) return;
+    window.__uisBehindBuilding=true;
     var wrap=document.createElement('div'); wrap.id='uis-webgl-bg'; wrap.setAttribute('aria-hidden','true');
     var _orbStyle=document.createElement('style'); _orbStyle.textContent='#uis-webgl-bg canvas{ pointer-events:auto !important; touch-action:none !important; } #uis-bg-orb-hint{ position:fixed; left:50%; bottom:92px; transform:translateX(-50%); z-index:5; pointer-events:none; font-size:11px; letter-spacing:0.04em; color:rgba(255,255,255,0.72); background:rgba(0,0,0,0.32); border:1px solid rgba(255,255,255,0.14); padding:5px 10px; border-radius:999px; backdrop-filter:blur(6px); }'; document.head.appendChild(_orbStyle); var _orbHint=document.createElement('div'); _orbHint.id='uis-bg-orb-hint'; _orbHint.textContent='HOLD the background orb for Orb Scanner  •  Drag to spin  •  Tap to change theme  •  Double-tap to pause'; document.body.appendChild(_orbHint); setTimeout(function(){ if(_orbHint) _orbHint.style.opacity='0'; _orbHint.style.transition='opacity 1s'; }, 6000);
     document.body.insertBefore(wrap, document.body.firstChild);
@@ -12217,7 +12413,11 @@ body.uis-drawer-open #inventory-hold-scan-button {
     document.body.insertBefore(veil, wrap.nextSibling);
     var fb=document.createElement('div'); fb.id='uis-css-fallback-bg';
     document.body.insertBefore(fb, veil.nextSibling);
-    if(mode==='off' || reduceMotion || typeof THREE==='undefined'){ document.body.classList.add('uis-no-webgl'); return; }
+    if(mode==='off' || reduceMotion || typeof THREE==='undefined'){
+      window.__uisBehindBuilding=false; window.__uisBehindBuilt=true;
+      window.__uisBehindStatus={ready:false, reason:mode==='off'?'3D mode is off':(reduceMotion?'reduced-motion preference':'Three.js failed to load')};
+      document.body.classList.add('uis-no-webgl'); return;
+    }
     try{
       var scene=new THREE.Scene();
       scene.background=new THREE.Color(0x2a2e2a);
@@ -12380,7 +12580,10 @@ body.uis-drawer-open #inventory-hold-scan-button {
           var a=(typeof app!=='undefined') ? app : null; if(!a) return false;
           if(a.activeView!=='pos' && a.activeView!=='scanner') return false;
           if(!a.workbook) return false;
-          if(a._orbScanActive || a._posScanHoldActive || a._inventoryHoldActive || a.isScannerOpen) return false;
+          /* Eligibility must not depend on the Orb scanner's own active flag.
+             The render loop calls this while a hold is active; treating
+             _orbScanActive as a conflict immediately cancelled every scan. */
+          if(a._posScanHoldActive || a._inventoryHoldActive || a.isScannerOpen) return false;
           return true;
         }catch(e){ return false; }
       }
@@ -12488,10 +12691,32 @@ body.uis-drawer-open #inventory-hold-scan-button {
       }
       try{ applyBgScannerTheme(document.documentElement.getAttribute('data-uis-theme')||'midnight-emerald'); }catch(e){}
       /* --- Interactive: drag to spin, tap to pulse + cycle theme, double-tap to pause, HOLD to scan (POS / Barcode Scanner only). --- */
-      var bgOrbState={ dragging:false, lastX:0, lastY:0, velX:0, velY:0, targetRY:0.42, targetRX:0.12, auto:true, pulse:0, downTime:0, moved:0, scanning:false, scanPointerId:null, holdTimer:null, scanSpeed:0.45, t:Math.random()*10, _lastTick:(typeof performance!=='undefined' && performance.now) ? performance.now() : Date.now() };
+      var bgOrbState={ dragging:false, lastX:0, lastY:0, velX:0, velY:0, targetRY:0.42, targetRX:0.12, auto:true, pulse:0, downTime:0, moved:0, scanning:false, scanPointerId:null, holdTimer:null, holdArmed:false, holdArmedPointerId:null, holdArmedX:0, holdArmedY:0, holdArmedMoved:0, suppressClickUntil:0, scanSpeed:0.45, t:Math.random()*10, _lastTick:(typeof performance!=='undefined' && performance.now) ? performance.now() : Date.now() };
       var bgOrbRay=new THREE.Raycaster(); var bgOrbPointer=new THREE.Vector2();
       var bgScannerHitMeshes=[bgOrb, bgOrbRing, bgOrbRing2, bgOrbInnerDisc].concat(bgOrbRings.map(function(r){ return r.mesh; })).concat(bgOrbSats.map(function(s){ return s.mesh; }));
-      function bgOrbHit(e){ var r=renderer.domElement.getBoundingClientRect(); bgOrbPointer.set(((e.clientX-r.left)/r.width)*2-1, -((e.clientY-r.top)/r.height)*2+1); bgOrbRay.setFromCamera(bgOrbPointer, camera); var hits=bgOrbRay.intersectObjects(bgScannerHitMeshes, false); return hits.length>0; }
+      function bgOrbHit(e){
+        try{
+          var r=renderer.domElement.getBoundingClientRect();
+          if(!r.width || !r.height || e.clientX<r.left || e.clientX>r.right || e.clientY<r.top || e.clientY>r.bottom) return false;
+          /* Keep the camera and scene matrices current even when input arrives between render frames. */
+          scene.updateMatrixWorld(true); camera.updateMatrixWorld(true);
+          bgOrbPointer.set(((e.clientX-r.left)/r.width)*2-1, -((e.clientY-r.top)/r.height)*2+1);
+          bgOrbRay.setFromCamera(bgOrbPointer, camera);
+          var hits=bgOrbRay.intersectObjects(bgScannerHitMeshes, false); if(hits.length) return true;
+          /* The page is intentionally layered above the background canvas. Use a generous
+             screen-space hit target around the visible orb so cards and text cannot make it inert. */
+          var worldCenter=new THREE.Vector3(); bgOrb.getWorldPosition(worldCenter);
+          var center=worldCenter.clone().project(camera);
+          if(!isFinite(center.x) || !isFinite(center.y) || center.z < -1 || center.z > 1) return false;
+          var cx=r.left+(center.x+1)*0.5*r.width, cy=r.top+(1-center.y)*0.5*r.height;
+          var edgeX=worldCenter.clone(); edgeX.x+=1.42; edgeX.project(camera);
+          var edgeY=worldCenter.clone(); edgeY.y+=1.42; edgeY.project(camera);
+          var rx=Math.hypot((edgeX.x-center.x)*r.width*0.5,(edgeX.y-center.y)*r.height*0.5);
+          var ry=Math.hypot((edgeY.x-center.x)*r.width*0.5,(edgeY.y-center.y)*r.height*0.5);
+          var radius=Math.max(58,rx,ry)+22;
+          return Math.hypot(e.clientX-cx,e.clientY-cy)<=radius;
+        }catch(err){ return false; }
+      }
       function bgOrbClearHoldTimer(){ if(bgOrbState.holdTimer){ try{ clearTimeout(bgOrbState.holdTimer); }catch(e){} bgOrbState.holdTimer=null; } }
       function bgOrbStartScan(pointerId){
         if(bgOrbState.scanning) return;
@@ -12503,15 +12728,28 @@ body.uis-drawer-open #inventory-hold-scan-button {
           try{ document.body.classList.add('hold-scan-active'); }catch(e){}
           /* SEPARATE Orb Scanner only - never calls beginPosHoldScan / beginMainInventoryHoldScan. */
           try{ a._orbHoldPointerId=pointerId; }catch(e){}
-          try{ a.beginOrbHoldScan(); }catch(e){ bgOrbState.scanning=false; bgOrbState.scanPointerId=null; try{ document.body.classList.remove('hold-scan-active'); }catch(e){} }
+          /* Observe async start failures instead of silently swallowing them. */
+          Promise.resolve(a.beginOrbHoldScan({ preventDefault:function(){} })).then(function(started){
+            if(started===false && bgOrbState.scanning && bgOrbState.scanPointerId===pointerId){
+              bgOrbState.scanning=false; bgOrbState.scanPointerId=null;
+              try{ document.body.classList.remove('hold-scan-active'); }catch(e){}
+            }
+          }).catch(function(err){
+            bgOrbState.scanning=false; bgOrbState.scanPointerId=null;
+            try{ document.body.classList.remove('hold-scan-active'); }catch(e){}
+            try{ if(a.showToast) a.showToast('Orb scanner could not start: '+(err&&err.message||'Unknown error'),'error'); }catch(e){}
+          });
         }catch(e){ bgOrbState.scanning=false; bgOrbState.scanPointerId=null; }
       }
       function bgOrbEndScan(pointerId){
         if(pointerId!=null && bgOrbState.scanPointerId!=null && pointerId!==bgOrbState.scanPointerId) return;
         if(!bgOrbState.scanning) return;
         bgOrbState.scanning=false; bgOrbState.scanPointerId=null; bgOrbClearHoldTimer();
-        /* Release only ends the HOLD gesture - the Orb Scanner stays open until Close / backdrop. Never closes POS or Inventory scanners. */
         try{ document.body.classList.remove('hold-scan-active'); }catch(e){}
+        /* RELEASE closes the Orb Scanner. The app keeps a multi-match picker /
+           camera-error card open (they need a tap) - everything else closes,
+           including a still-pending camera open (generation bump kills it). */
+        try{ var a=(typeof app!=='undefined') ? app : null; if(a && typeof a.endOrbHoldScan==='function') a.endOrbHoldScan(pointerId); }catch(e){}
       }
       function bgOrbClearHoldClass(){
         try{
@@ -12520,35 +12758,100 @@ body.uis-drawer-open #inventory-hold-scan-button {
           document.body.classList.remove('hold-scan-active');
         }catch(e){}
       }
-      function bgOrbIsInteractiveTarget(e){
+      function bgOrbIsHardBlocked(e){
         try{
           var t=e.target; if(!t || typeof t.closest!=='function') return false;
-          /* Never steal taps that belong to a real control, a form field, a grid cell, or an open overlay/modal. */
-          if(t.closest('input, textarea, select, button, a, label, [role="button"], [contenteditable], [onclick], [ondblclick], [data-action]')) return true;
-          if(t.closest('table, #virtual-worksheet-scroll, #sales-source-grid, #orb-scanner-overlay, #pos-camera-overlay, #inventory-camera-overlay, #uis-auth-gate, #sidebar-drawer, #drawer-backdrop, #scan-item-modal, #disambiguation-modal, .modal, .uis-modal')) return true;
+          /* Never steal from a real overlay / modal / auth gate / drawer. */
+          if(t.closest('#orb-scanner-overlay, #pos-camera-overlay, #inventory-camera-overlay, #uis-auth-gate, #sidebar-drawer, #drawer-backdrop, #scan-item-modal, #disambiguation-modal, .modal, .uis-modal')) return true;
           return false;
-        }catch(e){ return false; }
+        }catch(err){ return false; }
+      }
+      function bgOrbIsFormField(e){
+        try{
+          var t=e.target; if(!t || typeof t.closest!=='function') return false;
+          /* Typing / editing always wins - a hold on a field is not a scan. */
+          if(t.closest('input, textarea, select, [contenteditable]')) return true;
+          return false;
+        }catch(err){ return false; }
+      }
+      function bgOrbIsSoftInteractive(e){
+        try{
+          var t=e.target; if(!t || typeof t.closest!=='function') return false;
+          /* POS product cards (+ Add buttons), cart buttons, worksheet / grid
+             cells - these USED to block the orb hold entirely, so holding the
+             orb on POS / Barcode Scanner did nothing. They no longer block:
+             a TAP still reaches them, a HOLD over the orb opens the camera. */
+          if(t.closest('button, a, label, [role="button"], [onclick], [ondblclick], [data-action], table, #virtual-worksheet-scroll, #sales-source-grid')) return true;
+          return false;
+        }catch(err){ return false; }
+      }
+      function bgOrbDisarmHold(){
+        bgOrbState.holdArmed=false; bgOrbState.holdArmedPointerId=null; bgOrbClearHoldTimer();
+        try{ document.body.classList.remove('hold-scan-active'); }catch(err){}
+      }
+      function bgOrbTap(){
+        bgOrbState.pulse=1;
+        var themes=['midnight-emerald','graphite-pro','arctic-light','oceanic-blue','royal-violet','forest-slate','warm-sand','rosewater','lavender-bloom','cherry-blossom','peach-sorbet','berry-velvet'];
+        var cur=document.documentElement.getAttribute('data-uis-theme')||'midnight-emerald';
+        var idx=themes.indexOf(cur); var next=themes[(idx+1)%themes.length];
+        try{ document.documentElement.setAttribute('data-uis-theme', next); }catch(err){}
+        try{ localStorage.setItem('uis-theme', next); }catch(err){}
       }
       function bgOrbBeginGesture(e){
-        if(bgOrbState.dragging || bgOrbState.scanning) return false;
-        if(bgOrbIsInteractiveTarget(e)) return false;
-        if(!bgOrbCanScan()) return false; /* Only steal through foreground on POS / Barcode Scanner - everywhere else the canvas gaps still work and grid/cards stay untouched. */
+        if(bgOrbState.dragging || bgOrbState.scanning || bgOrbState.holdArmed) return false;
+        if(bgOrbIsHardBlocked(e)) return false;
+        if(bgOrbIsFormField(e)) return false;
+        /* Orb interaction is global. Camera activation remains separately gated by bgOrbCanScan(). */
         if(!bgOrbHit(e)) return false;
+        var pid=e.pointerId;
+        /* SOFT path - the page element under the background Orb still gets a normal tap.
+           We track the gesture without claiming it: a stationary tap pulses the Orb,
+           movement turns into an Orb drag, and a stationary hold starts scanning when allowed. */
+        if(bgOrbIsSoftInteractive(e)){
+          bgOrbState.holdArmed=true; bgOrbState.holdArmedPointerId=pid;
+          bgOrbState.holdArmedX=e.clientX; bgOrbState.holdArmedY=e.clientY; bgOrbState.holdArmedMoved=0;
+          bgOrbState.lastX=e.clientX; bgOrbState.lastY=e.clientY; bgOrbState.downTime=Date.now();
+          try{ document.body.classList.add('hold-scan-active'); }catch(err){}
+          bgOrbClearHoldTimer();
+          bgOrbState.holdTimer=setTimeout(function(){
+            bgOrbState.holdTimer=null;
+            if(bgOrbState.holdArmed && bgOrbState.holdArmedMoved<10 && bgOrbCanScan()){
+              var p2=bgOrbState.holdArmedPointerId; bgOrbState.holdArmed=false; bgOrbState.holdArmedPointerId=null;
+              bgOrbStartScan(p2);
+              if(!bgOrbState.scanning){ try{ document.body.classList.remove('hold-scan-active'); }catch(err){} }
+            }
+          }, 350);
+          return true;
+        }
+        /* HARD path - finger is on a gap / plain background. Claim immediately
+           (drag to spin, tap to cycle theme, hold to scan). */
         bgOrbState.dragging=true; bgOrbState.lastX=e.clientX; bgOrbState.lastY=e.clientY; bgOrbState.downTime=Date.now(); bgOrbState.moved=0; bgOrbState.velX=0; bgOrbState.velY=0;
         try{ renderer.domElement.style.cursor='grabbing'; }catch(err){}
         /* Block text selection / long-press callout from the FIRST millisecond - not after the 350ms hold timer. */
         try{ document.body.classList.add('hold-scan-active'); }catch(err){}
         try{ if(e.cancelable) e.preventDefault(); }catch(err){}
         bgOrbClearHoldTimer();
-        var pid=e.pointerId;
-        bgOrbState.holdTimer=setTimeout(function(){ bgOrbState.holdTimer=null; if(bgOrbState.dragging && bgOrbState.moved<8) bgOrbStartScan(pid); }, 350);
+        if(bgOrbCanScan()) bgOrbState.holdTimer=setTimeout(function(){ bgOrbState.holdTimer=null; if(bgOrbState.dragging && bgOrbState.moved<24) bgOrbStartScan(pid); }, 500);
         return true;
       }
       /* DOCUMENT-LEVEL orb gesture: the canvas is z-index 0 behind the page, so a finger on the orb
           actually lands on the product card / text covering it and the canvas never sees pointerdown.
-          Hit-test with the raycaster no matter what element was touched, claim the gesture, and
-          suppress selection immediately. Do NOT stopPropagation - window pointermove/pointerup must still fire. */
+          Hit-test with the raycaster no matter what element was touched.
+          SOFT path (card / button / grid): arm a hold, let the tap through if released early.
+          HARD path (gap): claim immediately. Do NOT stopPropagation - window pointermove/pointerup must still fire. */
        document.addEventListener('pointerdown', function(e){ bgOrbBeginGesture(e); }, true);
+      /* Swallow the ONE click that belongs to the press that started a scan.
+         The press was not preventDefaulted on the SOFT path, so without this the
+         card underneath would ALSO fire (e.g. + Add) after you release the orb.
+         Clicks on the scanner overlay itself (Retry / Close / picker) are exempt. */
+      document.addEventListener('click', function(e){
+        if(Date.now() < bgOrbState.suppressClickUntil){
+          if(e.target && typeof e.target.closest==='function' && e.target.closest('#orb-scanner-overlay, #pos-camera-overlay, #inventory-camera-overlay')) return;
+          try{ if(e.cancelable) e.preventDefault(); }catch(err){}
+          try{ e.stopPropagation(); }catch(err){}
+          bgOrbState.suppressClickUntil=0;
+        }
+      }, true);
        /* Selection / callout / scroll guards for the orb gesture - independent of the main app's guard. */
        document.addEventListener('selectstart', function(e){ if(bgOrbState.dragging || bgOrbState.scanning || document.body.classList.contains('hold-scan-active')){ try{ e.preventDefault(); }catch(err){} } }, true);
        document.addEventListener('contextmenu', function(e){ if(bgOrbState.dragging || bgOrbState.scanning || document.body.classList.contains('hold-scan-active')){ try{ e.preventDefault(); }catch(err){} } }, true);
@@ -12558,13 +12861,52 @@ body.uis-drawer-open #inventory-hold-scan-button {
            try{ if(e.cancelable) e.preventDefault(); }catch(err){}
          }
        }, { passive:false, capture:true });
-       renderer.domElement.addEventListener('pointerdown', function(e){ if(bgOrbState.dragging || bgOrbState.scanning) return; if(!bgOrbHit(e)) return; bgOrbState.dragging=true; bgOrbState.lastX=e.clientX; bgOrbState.lastY=e.clientY; bgOrbState.downTime=Date.now(); bgOrbState.moved=0; bgOrbState.velX=0; bgOrbState.velY=0; renderer.domElement.style.cursor='grabbing'; try{ document.body.classList.add('hold-scan-active'); }catch(err){} try{ if(e.cancelable) e.preventDefault(); }catch(err){} e.stopPropagation(); bgOrbClearHoldTimer(); if(bgOrbCanScan()){ var pid=e.pointerId; bgOrbState.holdTimer=setTimeout(function(){ bgOrbState.holdTimer=null; if(bgOrbState.dragging && bgOrbState.moved<8) bgOrbStartScan(pid); }, 350); } }, true);
-      window.addEventListener('pointermove', function(e){ if(bgOrbState.scanning) return; if(!bgOrbState.dragging) return; var dx=e.clientX-bgOrbState.lastX, dy=e.clientY-bgOrbState.lastY; bgOrbState.lastX=e.clientX; bgOrbState.lastY=e.clientY; bgOrbState.moved+=Math.abs(dx)+Math.abs(dy); if(bgOrbState.moved>8) bgOrbClearHoldTimer(); bgOrbState.targetRY+=dx*0.012; bgOrbState.targetRX=Math.max(-0.6, Math.min(0.6, bgOrbState.targetRX+dy*0.008)); bgOrbState.velY=dx*0.012; bgOrbState.velX=dy*0.008; }, { passive:true });
-      window.addEventListener('pointerup', function(e){ if(bgOrbState.scanning){ bgOrbEndScan(e.pointerId); bgOrbState.dragging=false; renderer.domElement.style.cursor=''; return; } if(!bgOrbState.dragging) return; bgOrbState.dragging=false; bgOrbClearHoldTimer(); renderer.domElement.style.cursor=''; bgOrbClearHoldClass(); var dt=Date.now()-bgOrbState.downTime; if(dt<350 && bgOrbState.moved<8){ bgOrbState.pulse=1; var themes=['midnight-emerald','graphite-pro','arctic-light','oceanic-blue','royal-violet','forest-slate','warm-sand','rosewater','lavender-bloom','cherry-blossom','peach-sorbet','berry-velvet']; var cur=document.documentElement.getAttribute('data-uis-theme')||'midnight-emerald'; var idx=themes.indexOf(cur); var next=themes[(idx+1)%themes.length]; try{ document.documentElement.setAttribute('data-uis-theme', next); }catch(err){} try{ localStorage.setItem('uis-theme', next); }catch(err){} } }, { passive:true });
-      window.addEventListener('pointercancel', function(e){ if(bgOrbState.scanning){ bgOrbEndScan(e.pointerId); } bgOrbState.dragging=false; bgOrbClearHoldTimer(); bgOrbClearHoldClass(); try{ renderer.domElement.style.cursor=''; }catch(err){} }, { passive:true });
-      window.addEventListener('blur', function(){ if(bgOrbState.scanning) bgOrbEndScan(null); bgOrbState.dragging=false; bgOrbClearHoldTimer(); bgOrbClearHoldClass(); }, { passive:true });
-      document.addEventListener('visibilitychange', function(){ if(document.hidden && bgOrbState.scanning) bgOrbEndScan(null); }, { passive:true });
-      renderer.domElement.addEventListener('dblclick', function(e){ if(bgOrbState.scanning) return; if(!bgOrbHit(e)) return; bgOrbState.auto=!bgOrbState.auto; }, true);
+       /* All input is delegated at document capture so the background canvas and covered-page paths behave identically. */
+      window.addEventListener('pointermove', function(e){ if(bgOrbState.scanning) return;
+      if(bgOrbState.holdArmed){
+        if(e.pointerId!==bgOrbState.holdArmedPointerId) return;
+        var adx=e.clientX-bgOrbState.holdArmedX, ady=e.clientY-bgOrbState.holdArmedY;
+        bgOrbState.holdArmedX=e.clientX; bgOrbState.holdArmedY=e.clientY;
+        bgOrbState.holdArmedMoved+=Math.abs(adx)+Math.abs(ady);
+        /* Convert a covered-page press into a drag once the user clearly moves. */
+        if(bgOrbState.holdArmedMoved>=10){
+          bgOrbClearHoldTimer(); bgOrbState.holdArmed=false; bgOrbState.holdArmedPointerId=null;
+          bgOrbState.dragging=true; bgOrbState.moved=bgOrbState.holdArmedMoved;
+          var totalX=e.clientX-bgOrbState.lastX, totalY=e.clientY-bgOrbState.lastY;
+          bgOrbState.lastX=e.clientX; bgOrbState.lastY=e.clientY;
+          bgOrbState.targetRY+=totalX*0.012;
+          bgOrbState.targetRX=Math.max(-0.6,Math.min(0.6,bgOrbState.targetRX+totalY*0.008));
+          bgOrbState.velY=totalX*0.012; bgOrbState.velX=totalY*0.008;
+          try{ renderer.domElement.style.cursor='grabbing'; }catch(err){}
+        }
+        return;
+      }
+      if(!bgOrbState.dragging) return;
+      var dx=e.clientX-bgOrbState.lastX, dy=e.clientY-bgOrbState.lastY; bgOrbState.lastX=e.clientX; bgOrbState.lastY=e.clientY;
+      bgOrbState.moved+=Math.abs(dx)+Math.abs(dy);
+      if(bgOrbState.moved>24) bgOrbClearHoldTimer();
+      bgOrbState.targetRY+=dx*0.012; bgOrbState.targetRX=Math.max(-0.6, Math.min(0.6, bgOrbState.targetRX+dy*0.008));
+      bgOrbState.velY=dx*0.012; bgOrbState.velX=dy*0.008;
+      }, { passive:true });
+      window.addEventListener('pointerup', function(e){
+        if(bgOrbState.scanning){ bgOrbEndScan(e.pointerId); bgOrbState.dragging=false; bgOrbState.holdArmed=false; bgOrbState.holdArmedPointerId=null; renderer.domElement.style.cursor=''; bgOrbState.suppressClickUntil=Date.now()+800; return; }
+        if(bgOrbState.holdArmed){
+          if(e.pointerId!==bgOrbState.holdArmedPointerId) return;
+          var tapMoved=bgOrbState.holdArmedMoved, tapDuration=Date.now()-bgOrbState.downTime;
+          bgOrbDisarmHold();
+          if(tapMoved<10){ bgOrbTap(); }
+          else { bgOrbState.suppressClickUntil=Date.now()+650; }
+          return;
+        }
+        if(!bgOrbState.dragging) return;
+        bgOrbState.dragging=false; bgOrbClearHoldTimer(); renderer.domElement.style.cursor=''; bgOrbClearHoldClass();
+        if(bgOrbState.moved>=10) bgOrbState.suppressClickUntil=Date.now()+650;
+        else if(Date.now()-bgOrbState.downTime<350) bgOrbTap();
+      }, { passive:true });
+      window.addEventListener('pointercancel', function(e){ if(bgOrbState.scanning){ bgOrbEndScan(e.pointerId); } if(bgOrbState.holdArmed) bgOrbDisarmHold(); bgOrbState.dragging=false; bgOrbClearHoldTimer(); bgOrbClearHoldClass(); try{ renderer.domElement.style.cursor=''; }catch(err){} }, { passive:true });
+      window.addEventListener('blur', function(){ if(bgOrbState.scanning) bgOrbEndScan(null); if(bgOrbState.holdArmed) bgOrbDisarmHold(); bgOrbState.dragging=false; bgOrbClearHoldTimer(); bgOrbClearHoldClass(); }, { passive:true });
+      document.addEventListener('visibilitychange', function(){ if(document.hidden && bgOrbState.scanning) bgOrbEndScan(null); if(document.hidden && bgOrbState.holdArmed) bgOrbDisarmHold(); }, { passive:true });
+      document.addEventListener('dblclick', function(e){ if(bgOrbState.scanning) return; if(!bgOrbHit(e)) return; bgOrbState.auto=!bgOrbState.auto; }, true);
       renderer.domElement.addEventListener('pointermove', function(e){ if(bgOrbState.dragging || bgOrbState.scanning) return; try{ renderer.domElement.style.cursor = bgOrbHit(e) ? 'grab' : ''; }catch(err){} }, { passive:true });
       function updateBgOrbTheme(id, t){
         try{ bgOrbMat.map=makeBgOrbTexture(id); bgOrbMat.needsUpdate=true; }catch(err){}
@@ -12576,6 +12918,7 @@ body.uis-drawer-open #inventory-hold-scan-button {
       window.__uisBgOrbState=bgOrbState;
       window.__uisBgOrbCanScan=bgOrbCanScan;
       window.__uisBgOrbIsScanning=bgOrbIsScanning;
+      window.__uisBgOrbDiagnostics={ ready:true, hitTest:bgOrbHit, state:bgOrbState, canvas:renderer.domElement };
       posGroup.position.set(0,-5.75,-1.5); posGroup.scale.setScalar(0.98); posGroup.rotation.y=0.42; /* Same framing as before - orb now floats, no stand/slab under it. */
       scene.add(posGroup);
       /* --- HD PRODUCT CANS — 32-seg cylinders, HD label textures, metal top --- */
@@ -13394,7 +13737,15 @@ body.uis-drawer-open #inventory-hold-scan-button {
       }
       tick();
       window.addEventListener('resize', function(){ camera.aspect=window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
-    }catch(err){ document.body.classList.add('uis-no-webgl'); }
+      window.__uisBehindBuilding=false; window.__uisBehindBuilt=true;
+      window.__uisBehindStatus={ready:true, reason:null};
+    }catch(err){
+      window.__uisBehindBuilding=false; window.__uisBehindBuilt=true;
+      window.__uisBehindStatus={ready:false, reason:String(err && err.message || err)};
+      window.__uisBgOrbInitError=String(err && err.stack || err);
+      try{ console.error('[UIS 3D background initialization failed]',err); }catch(_e){}
+      document.body.classList.add('uis-no-webgl');
+    }
   }
 
   function syncControlsLocation(){
@@ -13441,7 +13792,10 @@ body.uis-drawer-open #inventory-hold-scan-button {
   function init(){
     buildControls();
     // Defer heavy 3D until after login paints. If the auth gate is still up, wait for it to hide.
+    var behindStartRequested=false;
     var startBehind=function(){
+      if(behindStartRequested) return;
+      behindStartRequested=true;
       if(window.requestIdleCallback) window.requestIdleCallback(function(){ buildBehind(); }, {timeout:1200});
       else setTimeout(function(){ buildBehind(); }, 600);
     };
