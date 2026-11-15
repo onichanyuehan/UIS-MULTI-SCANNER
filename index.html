@@ -6307,17 +6307,47 @@ body.uis-drawer-open #inventory-hold-scan-button {
       async orbApplySingleMatch(key) {
         const item = this.getOperationItem(String(key));
         if (!item) { this.showToast('That inventory row is no longer available.', 'error'); await this.closeOrbScanner(); return; }
-        if (this._orbScanOriginView === 'scanner') {
-          await this.orbViewInInventory(String(key));
-          return;
-        }
-        if (!Number.isFinite(item.qty) || item.qty <= 0) {
-          this.showToast(`${item.itemName} is out of stock.`, 'error');
+        if (this._orbScanMode === 'pos') {
+          if (!Number.isFinite(item.qty) || item.qty <= 0) {
+            this.showToast(`${item.itemName} is out of stock.`, 'error');
+            await this.closeOrbScanner();
+            return;
+          }
+          this.orbAddToSale(String(key), { skipRender:true });
           await this.closeOrbScanner();
           return;
         }
-        this.orbAddToSale(String(key), { skipRender:true });
-        await this.closeOrbScanner();
+        await this.openOrbInventoryItemModal(String(key));
+      },
+
+      async openOrbInventoryItemModal(key) {
+        const item = this.getOperationItem(String(key));
+        const result = this._orbScanResult;
+        const product = result?.product;
+        if (!item || !product) {
+          this.showToast('The scanned inventory item could not be opened.', 'error');
+          await this.closeOrbScanner();
+          return;
+        }
+        const scannedCode = String(result.code || this._orbScanLastCode || '').trim();
+        const workbookIdx = Number.isInteger(Number(product.workbookIdx)) ? Number(product.workbookIdx) : (item.workbookIdx ?? this.activeWorkbookTabIndex ?? 0);
+        const sheetIdx = Number(item.sheetIdx ?? product.sheetIdx);
+        const rowNumber = Number(item.rowNumber ?? product.rowNumber);
+        if (workbookIdx !== (this.activeWorkbookTabIndex || 0)) {
+          await this.switchWorkbookTab(workbookIdx);
+        }
+        await this.stopOrbCameraScanner();
+        this._scanQtyInputValue = '1';
+        this.lastScanResult = {
+          workbookIdx, sheetIdx, sheetName: item.sheetName || product.sheetName || '', rowNumber,
+          scannedFull: scannedCode, suffix: scannedCode, len: scannedCode.length,
+          itemName: item.itemName || product.itemName || 'Unnamed item',
+          skuDisplay: product.skuDisplay || '', storedCode: product.storedCode || scannedCode,
+          matchedColumn: String(result.matchedColumn || product.matchedColumnName || 'Barcode'),
+          matchedColIndex: product.matchedColIndex ?? product.matchedColumnIndex ?? -1,
+          colComparisonSummary: product.colComparisonSummary || ''
+        };
+        this.renderScanItemModal();
       },
 
       renderOrbScanResult() {
