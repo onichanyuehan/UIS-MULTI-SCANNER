@@ -1726,6 +1726,30 @@ body.uis-drawer-open #inventory-hold-scan-button {
   }
   @media (prefers-reduced-motion:reduce) { body::before,body::after { animation:none !important; } }
 </style>
+
+<style id="uis-global-modal-backdrop-blur-fix-v9">
+/* Every visible fixed dialog gets a real translucent overlay that blurs the page behind it.
+   Keep the dialog card itself crisp; blur belongs on the full-screen backdrop layer. */
+body [role="dialog"].fixed.inset-0:not(.hidden),
+body .modal.fixed.inset-0:not(.hidden),
+body #scan-item-modal.fixed.inset-0:not(.hidden),
+body #new-row-modal.fixed.inset-0:not(.hidden),
+body #disambiguation-modal.fixed.inset-0:not(.hidden),
+body #inventory-column-setup-modal.fixed.inset-0:not(.hidden) {
+  background: rgba(2, 6, 18, .66) !important;
+  background-color: rgba(2, 6, 18, .66) !important;
+  background-image: none !important;
+  -webkit-backdrop-filter: blur(14px) saturate(125%) !important;
+  backdrop-filter: blur(14px) saturate(125%) !important;
+  box-shadow: none !important;
+}
+/* Do not blur the foreground dialog content. */
+body [role="dialog"].fixed.inset-0:not(.hidden) > *,
+body .modal.fixed.inset-0:not(.hidden) > * {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+</style>
 </head>
 <body class="min-h-screen bg-[#0d0d0d] text-[#ececec] flex flex-col selection:bg-emerald-500/30 selection:text-emerald-200 overflow-x-hidden uis-auth-locked">
 
@@ -7767,14 +7791,28 @@ body.uis-drawer-open #inventory-hold-scan-button {
         if (!modal || !d) return;
         // A scan result must have exactly one foreground dialog. Close/hide competing
         // scanner and legacy modal layers before rendering the item details dialog.
+        // Enforce one foreground dialog after a successful barcode match.
+        // Hide both scanner overlays and any other top-level dialog/popup, including
+        // the POS match chooser. Keep the existing scan-item-modal as the sole dialog.
         ['orb-scanner-overlay','pos-camera-overlay','inventory-camera-overlay',
-         'disambiguation-modal','inventory-column-setup-modal','new-row-modal'].forEach(id => {
+         'disambiguation-modal','inventory-column-setup-modal','new-row-modal',
+         'pos-barcode-match-choices'].forEach(id => {
           const other = document.getElementById(id);
           if (other && other !== modal) {
             other.classList.add('hidden');
-            if (id === 'orb-scanner-overlay') other.setAttribute('aria-hidden', 'true');
+            other.setAttribute('aria-hidden', 'true');
           }
         });
+        document.querySelectorAll('body > [role="dialog"], body > .modal, body > .popup-overlay, body > .uis-modal-overlay').forEach(other => {
+          if (other !== modal) {
+            other.classList.add('hidden');
+            other.setAttribute('aria-hidden', 'true');
+          }
+        });
+        const scannerResult = document.getElementById('orb-scanner-result');
+        if (scannerResult) { scannerResult.classList.add('hidden'); scannerResult.innerHTML = ''; }
+        const inlineDetails = document.getElementById('scanned-item-detail-panel');
+        if (inlineDetails) { inlineDetails.classList.add('hidden'); inlineDetails.innerHTML = ''; }
         modal.setAttribute('aria-hidden', 'false');
         const qtyRef = d.qtyCol != null && d.qtyCol >= 0 ? `${colIndexToLetter(d.qtyCol)}${d.rec.rowNumber}` : '—';
         const posKey = `${this.lastScanResult.workbookIdx ?? this.activeWorkbookTabIndex ?? 0}:${this.lastScanResult.sheetIdx}:${d.rec.rowNumber}`;
@@ -7812,7 +7850,7 @@ body.uis-drawer-open #inventory-hold-scan-button {
         if (window.lucide) lucide.createIcons();
       },
 
-      applyScanPopupQuantity(direction) {
+      async applyScanPopupQuantity(direction) {
         const input = document.getElementById('scan-quantity-input');
         const amount = Number(String(input?.value ?? '').trim());
         if (!Number.isSafeInteger(amount) || amount < 1) { this.showToast('Enter a whole number greater than zero.', 'error'); return; }
@@ -7823,14 +7861,16 @@ body.uis-drawer-open #inventory-hold-scan-button {
         const details = this.getScannedItemDetails();
         if (!details) { this.showToast('The matched worksheet row is no longer available.', 'error'); return; }
         if (delta < 0 && details.qty + delta < 0) { this.showToast('Quantity cannot go below zero.', 'error'); return; }
-        this.applyMatchedProductIncrement({
+        // Update stock in-place: keep the existing scan dialog open and do not
+        // rebuild the scanner view (which can surface a second dialog).
+        await this.applyMatchedProductIncrement({
           workbookIdx: r.workbookIdx ?? this.activeWorkbookTabIndex ?? 0,
           sheetIdx: r.sheetIdx, sheetName: r.sheetName, rowNumber: r.rowNumber, itemName: details.name,
           skuDisplay: r.skuDisplay, matchedColumnName: r.matchedColumn, matchedColIndex: r.matchedColIndex
-        }, r.scannedFull, r.suffix, r.len, delta, r.matchedColumn, r.colComparisonSummary);
+        }, r.scannedFull, r.suffix, r.len, delta, r.matchedColumn, r.colComparisonSummary, true);
       },
 
-      async applyMatchedProductIncrement(product, scannedFull, suffix, len, delta = 1, matchedColumn = '', colComparisonSummary = '') {
+      async applyMatchedProductIncrement(product, scannedFull, suffix, len, delta = 1, matchedColumn = '', colComparisonSummary = '', preserveScanPopup = false) {
         if (!this.workbook) return;
         const targetWorkbookIdx = Number.isInteger(Number(product.workbookIdx)) ? Number(product.workbookIdx) : (this.activeWorkbookTabIndex || 0);
         if (targetWorkbookIdx !== (this.activeWorkbookTabIndex || 0)) {
@@ -7943,6 +7983,15 @@ body.uis-drawer-open #inventory-hold-scan-button {
         this.scannerStatus = 'MATCHED';
         this.activeView = 'scanner';
         playScanSound('success');
+        if (preserveScanPopup) {
+          // Repaint only the contents of the one existing dialog. Avoid a full
+          // app render while the user is adjusting quantity from the scan popup.
+          const scanModal = document.getElementById('scan-item-modal');
+          if (scanModal && !scanModal.classList.contains('hidden')) {
+            this.renderScanItemModal();
+            return;
+          }
+        }
         this.renderAll();
         this.renderScanItemModal();
       },
@@ -8867,44 +8916,11 @@ body.uis-drawer-open #inventory-hold-scan-button {
           else idleHeroEl.classList.remove('hidden');
         }
 
+        // Successful barcode details are shown only in #scan-item-modal.
+        // Never render the older inline detail card as a second result window.
         if (detailPanelEl) {
-          if (hasActiveScanCard) {
-            const r = this.lastScanResult;
-            const ws = this.workbook?.worksheets?.[r.sheetIdx];
-            const rec = ws?.records?.find(row => row.rowNumber === r.rowNumber);
-            const targetFflzCol = ws ? (ws.duplicateResolvedColIndex || ws.fflzColIndex) : null;
-            const qty = String(rec?.currentFflzValue ?? r.newQty ?? '0');
-            const qtyRef = targetFflzCol != null && ws ? `${colIndexToLetter(targetFflzCol)}${r.rowNumber}` : '—';
-            const coord = `${r.sheetName}!${qtyRef}`;
-            detailPanelEl.innerHTML = `
-              <div class="chatgpt-card rounded-3xl p-4 sm:p-5 shadow-2xl space-y-4">
-                <div class="flex items-center justify-between gap-2 border-b border-white/10 pb-3">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <span class="px-2.5 py-1 rounded-full text-[11px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                      Won via ${escapeHtml(r.matchedColumn || 'CODE/BARCODE')} (${r.len}d: "${escapeHtml(r.suffix)}")
-                    </span>
-                    <span class="px-2.5 py-1 rounded-full text-[11px] bg-white/5 text-neutral-300 border border-white/10">
-                      ${escapeHtml(r.workbookName || this.workbook?.filename || 'Workbook')} • ${escapeHtml(r.sheetName)} • Row #${r.rowNumber}
-                    </span>
-                  </div>
-                  <button type="button" onclick="app.closeScanResultAndResumeCamera()" class="p-1.5 rounded-full text-neutral-400 hover:text-white hover:bg-white/10 cursor-pointer"><i data-lucide="x" class="w-4 h-4"></i></button>
-                </div>
-                <div class="bg-[#212121] p-4 rounded-2xl border border-white/10 space-y-3">
-                  <p class="text-sm leading-6 text-neutral-200"><strong class="text-white">Name:</strong> ${escapeHtml(r.itemName || '—')} <span class="text-neutral-500">/</span> <strong class="text-white">Barcode:</strong> <span class="font-mono">${escapeHtml(r.scannedFull || '—')}</span> <span class="text-neutral-500">/</span> <strong class="text-white">Price:</strong> ${escapeHtml(r.price || '—')} <span class="text-neutral-500">/</span> <strong class="text-white">Quantity:</strong> ${escapeHtml(qty)} <span class="text-neutral-500">/</span> <strong class="text-white">Coordinate:</strong> <span class="font-mono">${escapeHtml(coord)}</span></p>
-                  <div class="pt-3 border-t border-white/10 flex flex-wrap items-center gap-2">
-                    <label for="scanned-item-qty-input" class="text-xs text-neutral-400">Add quantity</label>
-                    <input id="scanned-item-qty-input" type="number" min="1" step="1" placeholder="1" value="" class="w-24 h-9 rounded-full bg-black border border-emerald-500/60 text-center font-mono text-base font-bold text-emerald-300 focus:outline-none px-2" />
-                    <button type="button" onclick="app.handleSetScannedItemQty(document.getElementById('scanned-item-qty-input').value)" class="px-4 h-9 rounded-full bg-white hover:bg-neutral-200 text-black font-semibold text-xs transition cursor-pointer flex items-center gap-1"><i data-lucide="check" class="w-3.5 h-3.5 stroke-[2.5]"></i><span>Confirm</span></button>
-                    <button type="button" onclick="app.openScannedRowInGrid()" class="ml-auto text-[11px] text-emerald-400 hover:underline cursor-pointer">Open in Sheet Grid →</button>
-                  ${this.notFoundPrompt ? `<button type="button" onclick="app.openNewRowModal('${escapeHtml(this.notFoundPrompt.scannedFull)}')" class="px-3 py-2 rounded-xl border border-amber-400/40 bg-amber-500/15 text-amber-200 text-xs font-semibold hover:bg-amber-500/25">+ Add scanned barcode to UNKNOWNS</button>` : ''}
-                  </div>
-                </div>
-              </div>
-            `;
-            detailPanelEl.classList.remove('hidden');
-          } else {
-            detailPanelEl.classList.add('hidden');
-          }
+          detailPanelEl.classList.add('hidden');
+          detailPanelEl.innerHTML = '';
         }
 
         if (notFoundEl) {
@@ -14984,6 +15000,20 @@ body > .uis-modal-overlay,
 #scan-item-modal.hidden, #disambiguation-modal.hidden, #new-row-modal.hidden,
 #inventory-column-setup-modal.hidden, #orb-scanner-overlay.hidden,
 #pos-camera-overlay.hidden, #inventory-camera-overlay.hidden { display: none !important; }
+</style>
+
+
+<style id="uis-single-scan-dialog-backdrop-fix-v10">
+/* Single scan result dialog: translucent full-screen layer blurs the actual page behind it. */
+#scan-item-modal:not(.hidden) {
+  position: fixed !important; inset: 0 !important; z-index: 9999 !important;
+  display: flex !important; align-items: center !important; justify-content: center !important;
+  background: rgba(2, 7, 16, .66) !important; background-color: rgba(2, 7, 16, .66) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(135%) !important;
+  backdrop-filter: blur(20px) saturate(135%) !important; isolation: isolate !important;
+}
+#scan-item-modal:not(.hidden) > * { position: relative !important; z-index: 1 !important; -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+#scan-item-modal.hidden { display: none !important; }
 </style>
 
 </body>
